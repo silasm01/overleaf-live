@@ -1,4 +1,4 @@
-From f0dd5457cfcb873d202d0bb14308764a79795c04 Mon Sep 17 00:00:00 2001
+From ddac198167453b3e84f25e4ee26d8496364fb931 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -7,9 +7,9 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
 ---
  src/frontend/editor.c     |  44 ++++++++++++
  src/frontend/editor.h     |  16 +++++
- src/frontend/engine_tex.c |  71 +++++++++++++++++++
- src/frontend/main.c       | 145 ++++++++++++++++++++++++++++++++++++++
- 4 files changed, 276 insertions(+)
+ src/frontend/engine_tex.c |  71 ++++++++++++++++++
+ src/frontend/main.c       | 148 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 279 insertions(+)
 
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
 index 6face98..665e8a9 100644
@@ -197,10 +197,10 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..e12211b 100644
+index c202294..5f30605 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -917,6 +917,122 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +917,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -208,7 +208,8 @@ index c202294..e12211b 100644
 +   (export-png dir width) turns it on; (export-range first last) says which
 +   pages are visible. The engine then runs up to the last of them, and each
 +   visible page is rendered to a PNG in dir when it changes, reported as
-+     (page-image page page-count terminated "path")
++     (page-image page page-count terminated "path" width height)
++   (width and height of the page in points)
 +   The front-end owns the file afterwards (it should delete it).
 +   (page-count n terminated) reports the number of pages when it changes. */
 +static char export_dir[1024];
@@ -288,7 +289,9 @@ index c202294..e12211b 100644
 +    fwrite(d, 1, n, f);
 +    fclose(f);
 +    export_hash[page] = h;
-+    printf("(page-image %d %d %d \"%s\")\n", page, count, done, path);
++    // the page size in points (the front-end needs it for zoom levels)
++    printf("(page-image %d %d %d \"%s\" %.2f %.2f)\n", page, count, done, path,
++           bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
 +  }
 +  fz_always(ctx)
 +  {
@@ -323,7 +326,7 @@ index c202294..e12211b 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1134,6 +1250,30 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1253,30 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -354,7 +357,7 @@ index c202294..e12211b 100644
    }
  }
  
-@@ -1353,6 +1493,10 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +1496,10 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -365,7 +368,7 @@ index c202294..e12211b 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1680,6 +1824,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +1827,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);

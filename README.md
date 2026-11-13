@@ -72,11 +72,15 @@ It gets the newest version from GitHub, rebuilds TeXpresso only when its patch c
 
 ## Use it
 
-1. Open an Overleaf project. Click **Live** (bottom right of the PDF pane).
-2. The viewer covers Overleaf's PDF pane. Click **Live** again to see Overleaf's PDF.
-3. The pages are one under the other, as in Overleaf. Scroll, or use ‹ › to go to the previous or next page. **−**, **Fit** and **+** (or Ctrl + mouse wheel) change the zoom. TeXpresso typesets up to the last page in view, so `2 / 3+` means "page 2, at least 3 pages". The pages under the visible ones are typeset when you scroll to them.
-4. **Lua**: for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn on Lua only for projects you trust (yours). The setting is saved for each project.
-5. **Sync** sends all project files again. The extension does this automatically when you open another file. Overleaf allows 10 downloads a minute, so the extension waits at least 10 seconds between syncs.
+1. Open an Overleaf project. Click **Live** (bottom right of the PDF pane). The live pages cover Overleaf's PDF.
+2. Use Overleaf's own PDF toolbar: the page number box and ˄ ˅, zoom − / + and the zoom menu (fit to width, fit to height, percentages), and the button that inverts the PDF colours. While Live is on, they work on the live pages. Ctrl + mouse wheel and Ctrl + / − / 0 / 9 also work on the live pages.
+3. The pages are one under the other. TeXpresso typesets up to the last page in view, so `/ 3+` means "at least 3 pages". The pages under the visible ones are typeset when you scroll to them.
+4. The **Live** button shows the status: a green dot is live, an orange dot is busy (typesetting, sending files, Lua), and a red dot shows the number of LaTeX errors. Click it for the menu:
+   - the status and the LaTeX errors with line numbers
+   - **Lua results**: for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn it on only for projects you trust (yours). The setting is saved for each project.
+   - **Sync files**: sends all project files again. The extension does this automatically when you open another file. Overleaf allows 10 downloads a minute, so the extension waits at least 10 seconds between syncs.
+   - **Turn off Live**: Overleaf's own PDF and toolbar again.
+5. **PDF in a separate tab**: use Overleaf's **Layout → PDF in separate tab**. The editor tab sends the edits, and the separate tab shows the live pages with the same toolbar. Turning Live on or off in one tab changes both. You can drag the tab out to its own window.
 
 The project's copy on your PC is in `~/.overleaf-live/<project id>/` in WSL.
 
@@ -88,7 +92,8 @@ The project's copy on your PC is in `~/.overleaf-live/<project id>/` in WSL.
 
 ## Limits of this prototype
 
-- There is no SyncTeX (click on the page to go to the source) yet.
+- There is no SyncTeX (the arrows between the editor and the PDF, or a double-click on the page) yet.
+- Overleaf's toolbar must be there: it shows when Overleaf has compiled a PDF of the project at least once.
 - After an edit, pages that are not in view are updated when you scroll to them.
 - The extension uses Overleaf's unsupported hook for extensions (`UNSTABLE_editor:extensions`). An Overleaf update can break it.
 - The extension reads edits only for the open file, but these include edits by collaborators. Changes in other files come with the next Sync.

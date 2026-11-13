@@ -14,6 +14,10 @@ typing, and TeXpresso then reads its saved results. Shell escape can run
 any command, so it is only done for projects where it is turned on in
 the extension.
 
+Several tabs can connect for the same project: with Overleaf's "PDF in
+separate tab", the editor tab sends the edits and the PDF tab shows the
+pages. Everything TeXpresso reports goes to all tabs of the project.
+
 Messages (JSON, one per WebSocket message)
   extension -> helper
     {"type": "hello", "project": id, "main": "main.tex", "lua": bool}
@@ -26,7 +30,8 @@ Messages (JSON, one per WebSocket message)
     {"type": "versions", "extension": "0.1.1"}   the version install.sh put
                                              in the Windows folder
     {"type": "status", "text": "...", "busy": bool}
-    {"type": "page", "page": n, "count": n, "done": bool, "png": base64}
+    {"type": "page", "page": n, "count": n, "done": bool, "png": base64,
+     "w": points, "h": points}                page size
     {"type": "count", "count": n, "done": bool}   pages so far; done: all
     {"type": "errors", "lines": ["...", ...]}
 """
@@ -68,15 +73,19 @@ def safe_path(root, rel):
     return p if p == root.resolve() or root.resolve() in p.parents else None
 
 
-class Session:
-    """One Overleaf project: its folder, TeXpresso and the background compile."""
+class Project:
+    """One Overleaf project: its folder, TeXpresso, the background compile
+    and the tabs connected to it."""
 
-    def __init__(self, ws):
-        self.ws = ws
-        self.project = None
-        self.dir = None
-        self.main = "main.tex"
+    def __init__(self, project):
+        self.project = project
+        self.dir = ROOT / project
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.clients = set()
+        self.main = ""
         self.lua = False
+        self.pages = {}             # page -> last "page" message (for new tabs)
+        self.last_msg = {}          # "status", "errors", "count" -> last message
         self.width = 1000
         self.first = 0              # the visible pages
         self.last = 0
@@ -90,11 +99,19 @@ class Session:
         self.lua_task = None
         self.lua_running = False
 
-    async def send(self, msg):
-        try:
-            await self.ws.send(json.dumps(msg))
-        except websockets.ConnectionClosed:
-            pass
+    async def send(self, msg, to=None):
+        """to all tabs of the project (or only to one)"""
+        if to is None:
+            if msg["type"] in ("status", "errors", "count"):
+                self.last_msg[msg["type"]] = msg
+            if msg["type"] == "page":
+                self.pages[msg["page"]] = msg
+        data = json.dumps(msg)
+        for ws in ([to] if to else list(self.clients)):
+            try:
+                await ws.send(data)
+            except websockets.ConnectionClosed:
+                pass
 
     async def status(self, text, busy=False):
         log("status:", text)
@@ -161,6 +178,7 @@ class Session:
             start_new_session=True)     # its own group: see kill_group
         self.out = ""
         self.sent_errors = None
+        self.pages.clear()
         self.reader = asyncio.create_task(self.read_texpresso(self.proc))
         await self.command(f"(export-png {sexp_string(str(self.export_dir))} {int(self.width)})")
         await self.command(f"(export-range {self.first} {self.last})")
@@ -190,7 +208,7 @@ class Session:
             await self.proc.stdin.drain()
 
     async def read_texpresso(self, proc):
-        page_re = re.compile(r'^\(page-image (\d+) (\d+) (\d) "(.*)"\)$')
+        page_re = re.compile(r'^\(page-image (\d+) (\d+) (\d) "(.*)"(?: ([\d.]+) ([\d.]+))?\)$')
         count_re = re.compile(r'^\(page-count (\d+) (\d)\)$')
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
@@ -208,7 +226,8 @@ class Session:
                 except OSError:
                     continue
                 await self.send({"type": "page", "page": page, "count": count,
-                                 "done": done, "png": base64.b64encode(data).decode()})
+                                 "done": done, "png": base64.b64encode(data).decode(),
+                                 "w": float(m[5] or 595.28), "h": float(m[6] or 841.89)})
                 continue
             m = count_re.match(line)
             if m:
@@ -284,20 +303,26 @@ class Session:
             await self.status(f"Lua results updated ({time.time() - t0:.1f} s)", False)
 
     # --- messages from the extension ---------------------------------
-    async def on_hello(self, msg):
-        project = re.sub(r"[^A-Za-z0-9_-]", "", str(msg.get("project", "")))
-        if not project:
-            return await self.status("no project id", False)
-        self.project = project
-        self.dir = ROOT / project
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self.main = msg.get("main") or "main.tex"
+    async def join(self, ws, msg):
+        """a tab connected: give it what the other tabs already have"""
+        self.clients.add(ws)
+        if msg.get("main"):
+            self.main = msg["main"]
         self.lua = bool(msg.get("lua"))
-        await self.status("waiting for the project files", True)
+        for kind in ("status", "errors", "count"):
+            if kind in self.last_msg:
+                await self.send(self.last_msg[kind], to=ws)
+        if not self.proc:
+            await self.status("waiting for the project files", True)
 
-    async def on_project(self, msg):
-        if not self.dir:
-            return
+    async def leave(self, ws):
+        self.clients.discard(ws)
+        if not self.clients:
+            await self.stop_texpresso()
+            if self.lua_task:
+                self.lua_task.cancel()
+
+    async def on_project(self, ws, msg):
         data = base64.b64decode(msg["zip"])
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             for info in z.infolist():
@@ -317,9 +342,7 @@ class Session:
             self.last_edit = 0
             self.schedule_lua()
 
-    async def on_edit(self, msg):
-        if not self.dir:
-            return
+    async def on_edit(self, ws, msg):
         target = safe_path(self.dir, msg.get("path", ""))
         if target is None:
             return
@@ -333,45 +356,32 @@ class Session:
         await self.command(f"(open {sexp_string(rel)} {sexp_string(text)})")
         self.schedule_lua()
 
-    async def on_view(self, msg):
+    async def on_view(self, ws, msg):
         self.first = max(0, int(msg.get("first", 0)))
         self.last = max(self.first, min(self.first + 20, int(msg.get("last", self.first))))
+        # pages TeXpresso already sent (it sends a page again only when it
+        # changes): a tab that just opened needs them now
+        for page in range(self.first, self.last + 1):
+            if page in self.pages:
+                await self.send(self.pages[page], to=ws)
         await self.command(f"(export-range {self.first} {self.last})")
 
-    async def on_width(self, msg):
-        self.width = max(200, min(4000, int(msg.get("width", 1000))))
+    async def on_width(self, ws, msg):
+        width = max(200, min(4000, int(msg.get("width", 1000))))
+        if width == self.width:
+            return
+        self.width = width
+        self.pages.clear()          # TeXpresso sends all visible pages again
         if self.export_dir:
             await self.command(f"(export-png {sexp_string(str(self.export_dir))} {self.width})")
 
-    async def on_lua(self, msg):
+    async def on_lua(self, ws, msg):
         self.lua = bool(msg.get("on"))
         if self.lua:
             self.last_edit = 0
             self.schedule_lua()
 
-    async def run(self):
-        handlers = {"hello": self.on_hello, "project": self.on_project,
-                    "edit": self.on_edit, "view": self.on_view,
-                    "width": self.on_width, "lua": self.on_lua}
-        try:
-            async for raw in self.ws:
-                try:
-                    msg = json.loads(raw)
-                    handler = handlers.get(msg.get("type"))
-                    if handler:
-                        await handler(msg)
-                except Exception as e:      # one bad message must not end the session
-                    log("error:", repr(e))
-                    await self.status(f"helper error: {e}", False)
-        except websockets.ConnectionClosed:
-            pass                            # the Overleaf tab was closed
-        finally:
-            await self.stop_texpresso()
-            if self.lua_task:
-                self.lua_task.cancel()
-
-
-SESSIONS = set()
+PROJECTS = {}                   # project id -> Project
 
 
 def installed_extension_version():
@@ -385,20 +395,46 @@ def installed_extension_version():
 async def handler(ws, path=None):
     log("extension connected")
     await ws.send(json.dumps({"type": "versions", "extension": installed_extension_version()}))
-    session = Session(ws)
-    SESSIONS.add(session)
+    project = None
     try:
-        await session.run()
+        async for raw in ws:
+            try:
+                msg = json.loads(raw)
+                kind = msg.get("type")
+                if kind == "hello":
+                    pid = re.sub(r"[^A-Za-z0-9_-]", "", str(msg.get("project", "")))
+                    if not pid:
+                        continue
+                    if project:
+                        await project.leave(ws)
+                    project = PROJECTS.get(pid) or PROJECTS.setdefault(pid, Project(pid))
+                    await project.join(ws, msg)
+                    continue
+                handler_fn = project and {
+                    "project": project.on_project, "edit": project.on_edit,
+                    "view": project.on_view, "width": project.on_width,
+                    "lua": project.on_lua}.get(kind)
+                if handler_fn:
+                    await handler_fn(ws, msg)
+            except Exception as e:          # one bad message must not end the connection
+                log("error:", repr(e))
+                if project:
+                    await project.status(f"helper error: {e}", False)
+    except websockets.ConnectionClosed:
+        pass                                # the Overleaf tab was closed
     finally:
-        SESSIONS.discard(session)
+        if project:
+            await project.leave(ws)
+            if not project.clients:
+                PROJECTS.pop(project.project, None)
     log("extension disconnected")
 
 
 def quit_now():
     """kill / Ctrl+C: stop TeXpresso and exit at once (don't wait for
     the Overleaf tabs to close their connections)"""
-    for session in SESSIONS:
-        session.kill_group()
+    for project in PROJECTS.values():
+        project.kill_group()
     log("stopped")
     os._exit(0)
 

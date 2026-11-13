@@ -1,51 +1,66 @@
-/* The Live button and the viewer that covers Overleaf's PDF pane */
+/* The live viewer over Overleaf's PDF pane, and the Live button.
+   Overleaf styles buttons and labels for its own theme: the rules here use
+   "all: unset" and !important where Overleaf's would win. */
 .olive-root { position: absolute; inset: 0; pointer-events: none; z-index: 20; }
-.olive-toggle {
-  all: unset; box-sizing: border-box;
-  pointer-events: auto; position: absolute; right: 12px; bottom: 12px; z-index: 2;
-  font: 600 12px/1 system-ui, sans-serif; padding: 7px 12px; border-radius: 14px;
-  border: 1px solid #bbb; background: #fff; color: #333; cursor: pointer;
-  box-shadow: 0 1px 4px rgba(0,0,0,.2);
-}
-.olive-toggle.olive-active { background: #138a36; border-color: #138a36; color: #fff; }
+
 .olive-pane {
-  pointer-events: auto; position: absolute; inset: 0; display: flex; flex-direction: column;
-  background: #525659; outline: none;
+  pointer-events: auto; position: absolute; inset: 0;
+  background: var(--pdf-bg, #525659);
 }
 .olive-pane[hidden] { display: none; }
-.olive-bar {
-  display: flex; align-items: center; gap: 8px; padding: 4px 8px; flex: none;
-  background: #f4f5f6; border-bottom: 1px solid #ccc; font: 12px/1.4 system-ui, sans-serif; color: #333;
+.olive-scroll { position: absolute; inset: 0; overflow: auto; padding: 12px; outline: none; }
+.olive-pages { display: flex; flex-direction: column; align-items: center; gap: 12px; min-width: min-content; }
+
+/* a page: its size comes from TeXpresso (A4 until then) */
+.olive-slot { flex: none; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.4); }
+.olive-slot img { display: block; width: 100%; height: 100%; }
+.olive-slot img:not([src]) { display: none; }
+/* Overleaf's "invert PDF colours" (theme button), as for its own pages */
+.pdf-dark-mode .olive-slot {
+  box-shadow: none;
+  filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%);
 }
-/* Overleaf styles buttons and labels for its own (dark) theme: override */
-.olive-bar button {
+
+/* --- the Live button: dot + status; a menu above it while Live is on --- */
+.olive-pill { pointer-events: auto; position: absolute; right: 14px; bottom: 14px; z-index: 2; }
+.olive-toggle {
+  all: unset; box-sizing: border-box; cursor: pointer; display: flex !important; align-items: center; gap: 7px;
+  font: 600 12px/1 system-ui, sans-serif !important; padding: 7px 12px !important; border-radius: 15px !important;
+  border: 1px solid #bbb !important; background: #fff !important; color: #333 !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,.25); max-width: 320px; white-space: nowrap;
+}
+.olive-toggle:hover { background: #f1f1f1 !important; }
+.olive-label { overflow: hidden; text-overflow: ellipsis; }
+.olive-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #999; }
+.olive-toggle[data-state="ok"]    .olive-dot { background: #138a36; }
+.olive-toggle[data-state="busy"]  .olive-dot { background: #d08a00; }
+.olive-toggle[data-state="error"] .olive-dot { background: #c9302c; }
+.olive-toggle[data-state="down"]  .olive-dot { background: #999; }
+.olive-toggle[data-state="off"]   .olive-dot { display: none; }
+
+.olive-menu {
+  position: absolute; right: 0; bottom: calc(100% + 8px); width: 360px; max-width: 80vw;
+  background: #fff; color: #333; border: 1px solid #ccc; border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.3); padding: 10px 12px;
+  font: 12px/1.4 system-ui, sans-serif;
+}
+.olive-menu[hidden] { display: none; }
+.olive-menu-status { color: #555; margin-bottom: 8px; }
+.olive-menu-errors {
+  margin: 0 0 8px !important; padding: 6px 8px !important; max-height: 200px; overflow: auto; white-space: pre-wrap;
+  background: #fdecea !important; color: #8a1c13 !important; border: 1px solid #e3b5b0 !important; border-radius: 4px;
+  font: 11px/1.4 ui-monospace, monospace !important;
+}
+.olive-menu-errors[hidden] { display: none; }
+.olive-menu-lua {
+  display: flex !important; align-items: center; gap: 6px; margin: 0 0 10px !important; cursor: pointer;
+  font: 12px/1.4 system-ui, sans-serif !important; color: #333 !important;
+}
+.olive-menu-lua input { margin: 0 !important; }
+.olive-menu-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+.olive-menu-buttons button {
   all: unset; box-sizing: border-box; cursor: pointer;
   font: 12px/1.4 system-ui, sans-serif !important; color: #333 !important;
-  background: #fff !important; border: 1px solid #bbb !important; border-radius: 4px !important;
-  padding: 2px 8px !important; min-width: 26px; text-align: center;
+  background: #fff !important; border: 1px solid #bbb !important; border-radius: 4px !important; padding: 3px 10px !important;
 }
-.olive-bar button:hover { background: #e8e8e8 !important; }
-.olive-bar label {
-  display: flex !important; align-items: center; gap: 3px; cursor: pointer; margin: 0 !important;
-  font: 12px/1.4 system-ui, sans-serif !important; color: #333 !important;
-}
-.olive-bar input[type="checkbox"] { margin: 0 !important; }
-.olive-page { min-width: 52px; color: #333 !important; text-align: center; font-variant-numeric: tabular-nums; }
-.olive-status { color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.olive-status.olive-busy::before { content: "● "; color: #d08a00; }
-.olive-spacer { flex: 1; }
-.olive-errors {
-  flex: none; max-height: 30%; overflow: auto; margin: 0; padding: 6px 10px; white-space: pre-wrap;
-  background: #fdecea; color: #8a1c13; font: 12px/1.4 ui-monospace, monospace; border-bottom: 1px solid #e3b5b0;
-}
-.olive-errors[hidden] { display: none; }
-.olive-scroll { flex: 1; overflow: auto; padding: 12px; outline: none; }
-.olive-pages { margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
-/* a page: A4 shape until its picture is there */
-.olive-slot {
-  background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.4); aspect-ratio: 210 / 297;
-}
-.olive-slot.olive-loaded { aspect-ratio: auto; }
-.olive-slot img { display: block; width: 100%; height: auto; }
-.olive-slot img:not([src]) { display: none; }
-.olive-bar button.olive-on { background: #dde8f6 !important; border-color: #8aaedc !important; }
+.olive-menu-buttons button:hover { background: #eee !important; }

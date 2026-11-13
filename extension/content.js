@@ -1,66 +1,119 @@
-// content.js -- the extension's part of the Overleaf page: the "Live"
-// button and viewer over Overleaf's PDF pane, the project upload, and the
-// edits from page.js, all sent to the local helper through background.js.
+// content.js -- the extension's part of the Overleaf page: the live viewer
+// over Overleaf's PDF pane, driven by Overleaf's own PDF toolbar (page,
+// zoom, theme); the Live button with its status and menu; the project
+// upload and the edits from page.js, all sent to the local helper through
+// background.js. Also runs in Overleaf's "PDF in separate tab"
+// (/project/<id>/detached): that tab shows the pages, the editor tab sends
+// the edits.
 (() => {
   const TAG = "__overleafLive";
-  const projectId = (location.pathname.match(/^\/project\/([0-9a-f]{24})/) || [])[1];
-  if (!projectId) return;
+  const match = location.pathname.match(/^\/project\/([0-9a-f]{24})(\/detached)?/);
+  if (!match) return;
+  const projectId = match[1];
+  const detached = !!match[2];
+  const PT = 4 / 3;              // CSS pixels per PDF point at 100% (as pdf.js)
 
   const settingsKey = "project:" + projectId;
-  let settings = { on: false, lua: false, main: "" };
+  let settings = { on: false, lua: false, main: "", zoom: { mode: "page-width", scale: 1 } };
   let port = null;
   let connected = false;
-  let docId = null;
-  let lastText = new Map();     // path -> text last sent
-  let pageCount = 0;           // pages typeset so far
-  let done = false;            // true: the document is finished, pageCount is all
-  let knownTotal = 0;          // pages when the document was last finished
-  let zoom = 1;                // 1: page width = pane width
-  let view = { first: -1, last: -1 };   // visible pages last sent
+  let lastText = new Map();      // path -> text last sent
+  let pageCount = 0;             // pages typeset so far
+  let done = false;              // true: the document is finished, pageCount is all
+  let knownTotal = 0;            // pages when the document was last finished
+  let pageSize = { w: 595.28, h: 841.89 };   // points, from the first page
   let lastSync = 0;
   let syncTimer = null;
   let widthTimer = null;
+  let view = { first: -1, last: -1 };        // visible pages last sent
+  let status = { text: "not connected", busy: false };
+  let errors = [];
 
-  // --- UI -------------------------------------------------------------
+  // --- the viewer and the Live button ---------------------------------
   const ui = document.createElement("div");
   ui.className = "olive-root";
   ui.innerHTML = `
-    <button class="olive-toggle" title="Live preview by TeXpresso on your PC">Live</button>
     <div class="olive-pane" hidden>
-      <div class="olive-bar">
-        <button class="olive-prev" title="Previous page">&lsaquo;</button>
-        <span class="olive-page">–</span>
-        <button class="olive-next" title="Next page">&rsaquo;</button>
-        <button class="olive-zoomout" title="Zoom out (Ctrl + wheel)">&minus;</button>
-        <button class="olive-fit" title="Fit width">Fit</button>
-        <button class="olive-zoomin" title="Zoom in (Ctrl + wheel)">+</button>
-        <span class="olive-status">not connected</span>
-        <span class="olive-spacer"></span>
-        <label title="Runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust.">
-          <input type="checkbox" class="olive-lua"> Lua</label>
-        <button class="olive-sync" title="Send all project files again">Sync</button>
-      </div>
-      <div class="olive-errors" hidden></div>
       <div class="olive-scroll" tabindex="0"><div class="olive-pages"></div></div>
+    </div>
+    <div class="olive-pill">
+      <div class="olive-menu" hidden>
+        <div class="olive-menu-status"></div>
+        <pre class="olive-menu-errors" hidden></pre>
+        <label class="olive-menu-lua" title="Runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust.">
+          <input type="checkbox" class="olive-lua"> Lua results (shell escape)</label>
+        <div class="olive-menu-buttons">
+          <button class="olive-sync" title="Send all project files again">Sync files</button>
+          <button class="olive-off">Turn off Live</button>
+        </div>
+      </div>
+      <button class="olive-toggle" title="Live preview by TeXpresso on your PC">
+        <span class="olive-dot"></span><span class="olive-label">Live</span></button>
     </div>`;
   const $ = (sel) => ui.querySelector(sel);
   const pane = $(".olive-pane"), scroller = $(".olive-scroll"), pages = $(".olive-pages");
+  const menu = $(".olive-menu");
 
-  function setStatus(text, busy) {
-    $(".olive-status").textContent = text;
-    $(".olive-status").classList.toggle("olive-busy", !!busy);
+  function active() {
+    return settings.on && ui.isConnected && !pane.hidden;
   }
 
+  // the Live button: a dot and a short status while Live is on
+  function showStatus() {
+    const toggle = $(".olive-toggle");
+    let label = "Live", state = "off";
+    if (settings.on) {
+      if (!connected) { state = "down"; label = "Live · not connected"; }
+      else if (errors.length) { state = "error"; label = `Live · ${errors.length} error${errors.length > 1 ? "s" : ""}`; }
+      else if (status.busy) { state = "busy"; label = `Live · ${status.text}`; }
+      else { state = "ok"; label = "Live"; }
+    }
+    $(".olive-label").textContent = label;
+    toggle.dataset.state = state;
+    toggle.title = settings.on ? status.text : "Live preview by TeXpresso on your PC";
+    $(".olive-menu-status").textContent = connected ? status.text : "Helper not running (start it in WSL).";
+    const box = $(".olive-menu-errors");
+    box.hidden = !errors.length;
+    box.textContent = errors.map((l) => "! " + l).join("\n");
+  }
+
+  function setStatus(text, busy) {
+    status = { text, busy: !!busy };
+    showStatus();
+  }
+
+  $(".olive-toggle").addEventListener("click", () => {
+    if (!settings.on) setOn(true);
+    else menu.hidden = !menu.hidden;
+  });
+  $(".olive-off").addEventListener("click", () => { menu.hidden = true; setOn(false); });
+  $(".olive-sync").addEventListener("click", () => sync(true));
+  $(".olive-lua").addEventListener("change", (e) => {
+    settings.lua = e.target.checked;
+    save();
+    send({ type: "lua", on: settings.lua });
+  });
+  document.addEventListener("click", (e) => {
+    if (!menu.hidden && !ui.querySelector(".olive-pill").contains(e.target)) menu.hidden = true;
+  }, true);
+
+  // --- pages ------------------------------------------------------------
   // One slot per page, one under the other as in Overleaf. While the
   // document isn't finished, one more empty slot: when it comes into view,
   // TeXpresso typesets the next page.
   function slots() { return pages.children; }
 
+  function newSlot() {
+    const slot = document.createElement("div");
+    slot.className = "olive-slot";
+    slot.appendChild(document.createElement("img"));
+    return slot;
+  }
+
   function setSlotCount(n) {
     while (slots().length < n) {
-      const slot = document.createElement("div");
-      slot.className = "olive-slot";
-      slot.appendChild(document.createElement("img"));
+      const slot = newSlot();
+      sizeSlot(slot, pageSize);
       pages.appendChild(slot);
     }
     while (slots().length > n) pages.lastChild.remove();
@@ -72,21 +125,58 @@
     // pages go away only when the document is finished (TeXpresso starts
     // again from page 1 for its second pass)
     setSlotCount(done ? want : Math.max(want, slots().length));
-    showPageNumber();
+    writeToolbar();
     checkView();
   }
 
-  function slotWidth() {
-    return Math.max(100, Math.round((scroller.clientWidth - 24) * zoom));
+  // --- zoom, as Overleaf's: 100% = 4/3 CSS pixels per point ---------------
+  function scale() {
+    const z = settings.zoom;
+    if (z.mode === "page-width")
+      return Math.max(0.1, (scroller.clientWidth - 24) / (pageSize.w * PT));
+    if (z.mode === "page-height")
+      return Math.max(0.1, (scroller.clientHeight - 24) / (pageSize.h * PT));
+    return z.scale;
+  }
+
+  function sizeSlot(slot, size) {
+    slot.dataset.w = size.w;
+    slot.dataset.h = size.h;
+    slot.style.width = Math.round(size.w * PT * scale()) + "px";
+    slot.style.aspectRatio = `${size.w} / ${size.h}`;
   }
 
   function applyZoom() {
-    pages.style.width = slotWidth() + "px";
-    $(".olive-fit").classList.toggle("olive-on", zoom === 1);
+    for (const slot of slots())
+      sizeSlot(slot, { w: +slot.dataset.w || pageSize.w, h: +slot.dataset.h || pageSize.h });
+    writeToolbar();
     sendWidth();
   }
 
-  // the first and last page in view
+  // zoom around the middle of the view
+  function setZoom(mode, value) {
+    const before = (scroller.scrollTop + scroller.clientHeight / 2) / (scroller.scrollHeight || 1);
+    if (mode === "zoom-in") settings.zoom = { mode: "scale", scale: Math.min(9.99, Math.round(scale() * 110) / 100) };
+    else if (mode === "zoom-out") settings.zoom = { mode: "scale", scale: Math.max(0.1, Math.round(scale() / 1.1 * 100) / 100) };
+    else if (mode === "scale") settings.zoom = { mode, scale: Math.min(9.99, Math.max(0.1, value)) };
+    else settings.zoom = { mode, scale: 1 };
+    save();
+    applyZoom();
+    scroller.scrollTop = before * scroller.scrollHeight - scroller.clientHeight / 2;
+    checkView();
+  }
+
+  // pictures are made for the page width on screen (sharp on HiDPI)
+  function sendWidth() {
+    clearTimeout(widthTimer);
+    widthTimer = setTimeout(() => {
+      if (!active()) return;
+      const css = pageSize.w * PT * scale();
+      send({ type: "width", width: Math.min(4000, Math.round(css * (window.devicePixelRatio || 1))) });
+    }, 150);
+  }
+
+  // --- which pages are in view ------------------------------------------
   function visibleRange() {
     const box = scroller.getBoundingClientRect();
     let first = -1, last = -1;
@@ -107,12 +197,9 @@
     return 0;
   }
 
-  function showPageNumber() {
-    // while TeXpresso typesets again after an edit, show the last total
+  function totalShown() {
     const total = done ? pageCount : Math.max(pageCount, knownTotal);
-    const more = !done && pageCount >= knownTotal;
-    const n = Math.min(currentPage() + 1, Math.max(total, 1));
-    $(".olive-page").textContent = `${n} / ${total}${more ? "+" : ""}`;
+    return { total: Math.max(total, 1), more: !done && pageCount >= knownTotal };
   }
 
   // tell the helper which pages are in view (plus one below, so that
@@ -122,72 +209,202 @@
     if (viewFrame) return;
     viewFrame = requestAnimationFrame(() => {
       viewFrame = 0;
-      if (pane.hidden) return;
+      if (!active()) return;
       const r = visibleRange();
       r.last += 1;
       if (r.first !== view.first || r.last !== view.last) {
         view = r;
         send({ type: "view", first: r.first, last: r.last });
       }
-      showPageNumber();
+      writeToolbar();
     });
   }
   scroller.addEventListener("scroll", checkView, { passive: true });
 
   function gotoPage(n) {
-    if (n < 0 || n >= slots().length) return;
+    const { total } = totalShown();
+    n = Math.max(0, Math.min(n, Math.max(slots().length, total) - 1));
+    if (n >= slots().length) setSlotCount(n + 1);
     scroller.scrollTo({ top: slots()[n].offsetTop - 8 });
-  }
-
-  // zoom around the middle of the view
-  function setZoom(z) {
-    z = Math.min(4, Math.max(0.3, z));
-    if (z === zoom) return;
-    const mid = (scroller.scrollTop + scroller.clientHeight / 2) / (scroller.scrollHeight || 1);
-    zoom = z;
-    applyZoom();
-    scroller.scrollTop = mid * scroller.scrollHeight - scroller.clientHeight / 2;
     checkView();
   }
 
-  // Overleaf redraws its panes; put the UI back when it disappears
+  // Ctrl + wheel and Overleaf's keyboard shortcuts, on the live pages
+  scroller.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    setZoom("scale", scale() * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+  }, { passive: false });
+  scroller.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const action = { "+": "zoom-in", "=": "zoom-in", "-": "zoom-out", "0": "page-width", "9": "page-height" }[e.key];
+    if (!action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setZoom(action);
+  });
+
+  // --- Overleaf's PDF toolbar drives the live pages ----------------------
+  // Overleaf's toolbar is React and controls Overleaf's own PDF (pdf.js),
+  // which stays under the live pages. While Live is on, clicks on its page
+  // and zoom controls are caught before Overleaf gets them, and the page
+  // number and zoom shown are the live ones. The theme button is left to
+  // Overleaf: it sets .pdf-dark-mode, which the live pages follow (CSS).
+  const controls = () => document.querySelector("#toolbar-pdf-controls");
+
+  function toolbarParts() {
+    const c = controls();
+    if (!c) return {};
+    const pageBox = c.querySelector(".pdfjs-page-number-input");
+    const pageButtons = pageBox && pageBox.previousElementSibling &&
+      pageBox.previousElementSibling.matches(".pdfjs-toolbar-buttons")
+      ? pageBox.previousElementSibling.querySelectorAll("button") : [];
+    return {
+      prev: pageButtons[0], next: pageButtons[1],
+      pageInput: pageBox && pageBox.querySelector("input"),
+      pageTotal: pageBox && pageBox.querySelector("span"),
+      zoomButtons: c.querySelectorAll(".pdfjs-zoom-controls .pdfjs-toolbar-buttons button"),
+      zoomLabel: document.querySelector("#pdf-zoom-dropdown"),
+    };
+  }
+
+  // what Overleaf (React) wrote, to put back when Live is turned off
+  const original = new Map();    // element -> {text, value, disabled}
+  function setText(el, text) {
+    if (!el || el.textContent === text) return;
+    if (!original.has(el)) original.set(el, {});
+    const o = original.get(el);
+    if (o.ours !== el.textContent) o.text = el.textContent;   // React changed it
+    el.textContent = text;
+    o.ours = text;
+  }
+  function setValue(el, value) {
+    if (!el || el.value === value || document.activeElement === el) return;
+    if (!original.has(el)) original.set(el, {});
+    const o = original.get(el);
+    if (o.oursValue !== el.value) o.value = el.value;
+    el.value = value;
+    o.oursValue = value;
+  }
+  function setDisabled(el, disabled) {
+    if (!el || el.disabled === disabled) return;
+    if (!original.has(el)) original.set(el, {});
+    const o = original.get(el);
+    if (o.oursDisabled !== el.disabled) o.disabled = el.disabled;
+    el.disabled = disabled;
+    o.oursDisabled = disabled;
+  }
+  function restoreToolbar() {
+    for (const [el, o] of original) {
+      if (!el.isConnected) continue;
+      if (o.text !== undefined) el.textContent = o.text;
+      if (o.value !== undefined) el.value = o.value;
+      if (o.disabled !== undefined) el.disabled = o.disabled;
+    }
+    original.clear();
+  }
+
+  function writeToolbar() {
+    if (!active()) return;
+    const t = toolbarParts();
+    const { total, more } = totalShown();
+    const n = Math.min(currentPage() + 1, total);
+    setValue(t.pageInput, String(n));
+    setText(t.pageTotal, `/ ${total}${more ? "+" : ""}`);
+    setDisabled(t.prev, n <= 1);
+    setDisabled(t.next, done && n >= total);
+    setText(t.zoomLabel, `${Math.round(scale() * 100)}%`);
+  }
+
+  function block(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  }
+
+  function closeZoomMenu() {
+    const toggle = document.querySelector("#pdf-zoom-dropdown");
+    if (toggle && toggle.getAttribute("aria-expanded") === "true") {
+      toggle.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      if (toggle.getAttribute("aria-expanded") === "true") toggle.click();
+    }
+  }
+
+  window.addEventListener("click", (e) => {
+    if (!active()) return;
+    const button = e.target.closest && e.target.closest("button");
+    if (!button || !controls()) return;
+    const t = toolbarParts();
+    if (button === t.prev) { block(e); gotoPage(currentPage() - 1); return; }
+    if (button === t.next) { block(e); gotoPage(currentPage() + 1); return; }
+    if (button === t.zoomButtons[0]) { block(e); setZoom("zoom-out"); return; }
+    if (button === t.zoomButtons[1]) { block(e); setZoom("zoom-in"); return; }
+    // the zoom menu: zoom in, zoom out, fit width, fit height, (present), 50%..400%
+    const menuEl = button.closest(".pdfjs-zoom-dropdown-menu");
+    if (menuEl) {
+      const items = [...menuEl.querySelectorAll("button.dropdown-item")];
+      const i = items.indexOf(button);
+      const percent = button.textContent.trim().match(/^(\d+)\s*%$/);
+      let action = null;
+      if (percent) action = ["scale", +percent[1] / 100];
+      else if (i >= 0 && i < 4) action = [["zoom-in", "zoom-out", "page-width", "page-height"][i]];
+      if (!action) return;                 // e.g. presentation mode: Overleaf's own
+      block(e);
+      setZoom(...action);
+      closeZoomMenu();
+    }
+  }, true);
+
+  // the page number box: Enter, or leaving it
+  function pageFromInput(input) {
+    const n = parseInt(input.value, 10);
+    if (!isNaN(n)) gotoPage(n - 1);
+    writeToolbar();
+  }
+  window.addEventListener("submit", (e) => {
+    if (!active()) return;
+    const t = toolbarParts();
+    if (t.pageInput && e.target.contains(t.pageInput)) { block(e); pageFromInput(t.pageInput); }
+  }, true);
+  window.addEventListener("focusout", (e) => {
+    if (!active()) return;
+    const t = toolbarParts();
+    if (e.target === t.pageInput) {
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+      setTimeout(() => pageFromInput(t.pageInput), 0);
+    }
+  }, true);
+  // the custom zoom box in the zoom menu
+  window.addEventListener("keydown", (e) => {
+    if (!active() || e.key !== "Enter") return;
+    const box = e.target.closest && e.target.closest(".pdfjs-custom-zoom-menu-item");
+    if (!box) return;
+    const percent = parseFloat(e.target.value);
+    block(e);
+    if (!isNaN(percent)) setZoom("scale", percent / 100);
+    closeZoomMenu();
+  }, true);
+
+  // --- placing the viewer -------------------------------------------------
+  // Overleaf redraws its panes: put the viewer back when it disappears, and
+  // keep the toolbar showing the live values
+  let domFrame = 0;
   function attach() {
     const host = document.querySelector(".pdf-viewer");
     if (host && ui.parentElement !== host) {
       if (getComputedStyle(host).position === "static") host.style.position = "relative";
       host.appendChild(ui);
       applyZoom();
+      view = { first: -1, last: -1 };
+      checkView();
     }
+    writeToolbar();
   }
-  new MutationObserver(attach).observe(document.body, { childList: true, subtree: true });
+  new MutationObserver(() => {
+    if (!domFrame) domFrame = requestAnimationFrame(() => { domFrame = 0; attach(); });
+  }).observe(document.body, { childList: true, subtree: true, characterData: true });
   attach();
-
-  $(".olive-toggle").addEventListener("click", () => setOn(!settings.on));
-  $(".olive-prev").addEventListener("click", () => gotoPage(currentPage() - 1));
-  $(".olive-next").addEventListener("click", () => gotoPage(currentPage() + 1));
-  $(".olive-zoomin").addEventListener("click", () => setZoom(zoom * 1.25));
-  $(".olive-zoomout").addEventListener("click", () => setZoom(zoom / 1.25));
-  $(".olive-fit").addEventListener("click", () => setZoom(1));
-  scroller.addEventListener("wheel", (e) => {
-    if (!e.ctrlKey) return;
-    e.preventDefault();
-    setZoom(zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
-  }, { passive: false });
-  $(".olive-sync").addEventListener("click", () => sync(true));
-  $(".olive-lua").addEventListener("change", (e) => {
-    settings.lua = e.target.checked;
-    save();
-    send({ type: "lua", on: settings.lua });
-  });
-
-  // pictures are made for the page width on screen (sharp on HiDPI)
-  function sendWidth() {
-    clearTimeout(widthTimer);
-    widthTimer = setTimeout(() => {
-      const w = Math.min(4000, Math.round(slotWidth() * (window.devicePixelRatio || 1)));
-      send({ type: "width", width: w });
-    }, 150);
-  }
   new ResizeObserver(() => { applyZoom(); checkView(); }).observe(scroller);
 
   // --- connection ---------------------------------------------------
@@ -209,6 +426,7 @@
     port.onDisconnect.addListener(() => {
       port = null;
       connected = false;
+      showStatus();
       if (settings.on) setTimeout(connect, 1000);   // the service worker restarted
     });
   }
@@ -222,10 +440,11 @@
   function startSession() {
     lastText.clear();
     send({ type: "hello", project: projectId, main: settings.main, lua: settings.lua });
-    sendWidth();
     view = { first: -1, last: -1 };
+    sendWidth();
     checkView();
-    sync(true);
+    // the editor tab sends the files; the PDF tab only when asked (Sync)
+    if (!detached) sync(true);
   }
 
   function onHelper(msg) {
@@ -242,38 +461,56 @@
       case "status":
         setStatus(msg.text, msg.busy);
         break;
-      case "page":
+      case "page": {
         pageCount = Math.max(msg.count, msg.page + 1);
         done = msg.done;
-        updateSlots();
-        if (slots()[msg.page]) {
-          const img = slots()[msg.page].firstChild;
-          img.src = "data:image/png;base64," + msg.png;
-          slots()[msg.page].classList.add("olive-loaded");
+        const size = { w: msg.w || pageSize.w, h: msg.h || pageSize.h };
+        if (msg.page === 0 && (size.w !== pageSize.w || size.h !== pageSize.h)) {
+          pageSize = size;
+          applyZoom();
         }
-        if (!$(".olive-status").classList.contains("olive-busy")) setStatus("live", false);
+        updateSlots();
+        const slot = slots()[msg.page];
+        if (slot) {
+          sizeSlot(slot, size);
+          slot.firstChild.src = "data:image/png;base64," + msg.png;
+          slot.classList.add("olive-loaded");
+        }
+        if (!status.busy && status.text !== "live") setStatus("live", false);
         break;
+      }
       case "count":
         pageCount = msg.count;
         done = msg.done;
         updateSlots();
         break;
-      case "errors": {
-        const box = $(".olive-errors");
-        box.hidden = !msg.lines.length;
-        box.textContent = msg.lines.map((l) => "! " + l).join("\n");
+      case "errors":
+        errors = msg.lines;
+        showStatus();
         break;
-      }
     }
   }
 
   function setOn(on) {
     settings.on = on;
     save();
-    pane.hidden = !on;
-    $(".olive-toggle").classList.toggle("olive-active", on);
-    if (on) { connect(); applyZoom(); }
-    else disconnect();
+    apply();
+  }
+
+  // turn the viewer and the connection on or off (also when another tab of
+  // this project changed the setting)
+  function apply() {
+    const was = !pane.hidden;
+    pane.hidden = !settings.on;
+    $(".olive-lua").checked = settings.lua;
+    if (settings.on && !port) connect();
+    if (!settings.on) {
+      disconnect();
+      menu.hidden = true;
+      if (was) restoreToolbar();
+    }
+    if (settings.on) { applyZoom(); checkView(); }
+    showStatus();
   }
 
   // --- project files --------------------------------------------------
@@ -329,6 +566,7 @@
   }
 
   // --- edits from page.js -------------------------------------------
+  let docId = null;
   window.addEventListener("message", (evt) => {
     if (evt.source !== window || !evt.data || !evt.data[TAG]) return;
     const msg = evt.data;
@@ -348,14 +586,24 @@
     send({ type: "edit", path, text: msg.text });
   });
 
-  // --- settings per project -------------------------------------------
+  // --- settings per project (shared by the editor tab and the PDF tab) ----
   function save() {
     chrome.storage.local.set({ [settingsKey]: settings });
   }
 
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes[settingsKey]) return;
+    const next = changes[settingsKey].newValue || {};
+    const turned = next.on !== settings.on;
+    const luaChanged = next.lua !== settings.lua;
+    settings = Object.assign(settings, next);
+    if (turned) apply();
+    else if (luaChanged) $(".olive-lua").checked = settings.lua;
+  });
+
   chrome.storage.local.get(settingsKey, (r) => {
     settings = Object.assign(settings, r[settingsKey] || {});
-    $(".olive-lua").checked = settings.lua;
-    if (settings.on) setOn(true);
+    if (!settings.zoom || !settings.zoom.mode) settings.zoom = { mode: "page-width", scale: 1 };
+    apply();
   });
 })();
