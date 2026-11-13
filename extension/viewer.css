@@ -12,14 +12,25 @@
 .olive-pages { display: flex; flex-direction: column; align-items: center; gap: 12px; min-width: min-content; }
 
 /* a page: its size comes from TeXpresso (A4 until then) */
-.olive-slot { flex: none; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.4); }
+.olive-slot { flex: none; position: relative; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.4); }
 .olive-slot img { display: block; width: 100%; height: 100%; }
 .olive-slot img:not([src]) { display: none; }
 /* Overleaf's "invert PDF colours" (theme button), as for its own pages */
-.pdf-dark-mode .olive-slot {
-  box-shadow: none;
+/* (on the picture only, so that the caret keeps its colour) */
+.pdf-dark-mode .olive-slot { box-shadow: none; background: #262626; }
+.pdf-dark-mode .olive-slot img {
   filter: invert(95%) hue-rotate(180deg) brightness(90%) contrast(90%);
 }
+
+/* the editor cursor on the page (SyncTeX), blinking as a text cursor */
+.olive-caret {
+  position: absolute; width: 2px; margin-left: -1px; pointer-events: none;
+  background: #e8590c; border-radius: 1px; box-shadow: 0 0 0 1px rgba(255,255,255,.6);
+  animation: olive-blink 1.06s steps(1) infinite;
+}
+.olive-caret.olive-caret-stale { opacity: .35; animation: none; }
+.pdf-dark-mode .olive-caret { background: #ff922b; box-shadow: 0 0 0 1px rgba(0,0,0,.5); }
+@keyframes olive-blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0; } }
 
 /* --- the Live button: dot + status; a menu above it while Live is on --- */
 .olive-pill { pointer-events: auto; position: absolute; right: 14px; bottom: 14px; z-index: 2; }

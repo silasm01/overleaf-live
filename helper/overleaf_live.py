@@ -26,6 +26,9 @@ Messages (JSON, one per WebSocket message)
     {"type": "view", "first": n, "last": n}  the visible pages (from 0)
     {"type": "width", "width": px}           picture width in pixels
     {"type": "lua", "on": bool}
+    {"type": "cursor", "path": p, "line": n, "column": n}   editor cursor
+                                             (line from 1, column from 0)
+    {"type": "scan", "page": n, "x": pt, "y": pt}   double-click on a page
   helper -> extension
     {"type": "versions", "extension": "0.1.1"}   the version install.sh put
                                              in the Windows folder
@@ -34,6 +37,14 @@ Messages (JSON, one per WebSocket message)
      "w": points, "h": points}                page size
     {"type": "count", "count": n, "done": bool}   pages so far; done: all
     {"type": "errors", "lines": ["...", ...]}
+    {"type": "caret", "page": n, "x": pt, "y": pt, "h": pt, "d": pt}
+                                             the cursor in the PDF (y is the
+                                             baseline; h, d: line height)
+    {"type": "goto", "path": p, "line": n, "column": n}   reverse search
+
+SyncTeX: TeXpresso's engine (patched) writes the column next to the line
+in each SyncTeX record, so both directions work to about one character in
+normal text; inside a macro argument, to the argument.
 """
 import asyncio
 import base64
@@ -211,6 +222,8 @@ class Project:
         page_re = re.compile(r'^\(page-image (\d+) (\d+) (\d) "(.*)"(?: ([\d.]+) ([\d.]+))?\)$')
         count_re = re.compile(r'^\(page-count (\d+) (\d)\)$')
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
+        caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)\)$')
+        back_re = re.compile(r'^\(synctex "(.*)" (-?\d+) (-?\d+)\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
             raw = await proc.stdout.readline()
@@ -228,6 +241,18 @@ class Project:
                 await self.send({"type": "page", "page": page, "count": count,
                                  "done": done, "png": base64.b64encode(data).decode(),
                                  "w": float(m[5] or 595.28), "h": float(m[6] or 841.89)})
+                continue
+            m = caret_re.match(line)
+            if m:
+                await self.send({"type": "caret", "page": int(m[1]), "x": float(m[2]),
+                                 "y": float(m[3]), "h": float(m[4]), "d": float(m[5])})
+                continue
+            m = back_re.match(line)
+            if m:
+                rel = self.project_path(re.sub(r'\\(.)', r'\1', m[1]))
+                if rel:
+                    await self.send({"type": "goto", "path": rel, "line": int(m[2]),
+                                     "column": max(0, int(m[3]))})
                 continue
             m = count_re.match(line)
             if m:
@@ -248,6 +273,14 @@ class Project:
         if self.proc is proc:
             await self.status("TeXpresso stopped (it restarts with the next edit)", False)
             self.proc = None
+
+    def project_path(self, path):
+        """a path from TeXpresso -> the path in the Overleaf project"""
+        full = os.path.normpath(path if os.path.isabs(path) else os.path.join(self.dir, path))
+        rel = os.path.relpath(full, os.path.realpath(self.dir))
+        if rel.startswith(".."):
+            rel = os.path.relpath(full, self.dir)
+        return None if rel.startswith("..") else rel.replace(os.sep, "/")
 
     async def report_errors(self):
         lines = []
@@ -336,6 +369,7 @@ class Project:
         log(f"project {self.project}: {len(data) // 1024} KiB unpacked")
         if self.proc and self.proc.returncode is None:
             await self.command("(rescan)")
+            await self.status("project files updated", False)
         else:
             await self.start_texpresso()
         if self.lua and not list(self.dir.glob("*.luakeys")):
@@ -375,6 +409,23 @@ class Project:
         if self.export_dir:
             await self.command(f"(export-png {sexp_string(str(self.export_dir))} {self.width})")
 
+    async def on_cursor(self, ws, msg):
+        """forward search: TeXpresso answers with (synctex-target ...)"""
+        target = safe_path(self.dir, msg.get("path", ""))
+        if target is None or not self.proc or self.proc.returncode is not None:
+            return
+        line = max(1, int(msg.get("line", 1)))
+        column = max(0, int(msg.get("column", 0)))
+        await self.command(f"(synctex-forward {sexp_string(str(target))} {line} {column})")
+
+    async def on_scan(self, ws, msg):
+        """reverse search: TeXpresso answers with (synctex "path" line column)"""
+        if not self.proc or self.proc.returncode is not None:
+            return
+        page = max(0, int(msg.get("page", 0)))
+        x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
+        await self.command(f"(synctex-scan {page} {x:.2f} {y:.2f})")
+
     async def on_lua(self, ws, msg):
         self.lua = bool(msg.get("on"))
         if self.lua:
@@ -413,7 +464,8 @@ async def handler(ws, path=None):
                 handler_fn = project and {
                     "project": project.on_project, "edit": project.on_edit,
                     "view": project.on_view, "width": project.on_width,
-                    "lua": project.on_lua}.get(kind)
+                    "lua": project.on_lua, "cursor": project.on_cursor,
+                    "scan": project.on_scan}.get(kind)
                 if handler_fn:
                     await handler_fn(ws, msg)
             except Exception as e:          # one bad message must not end the connection

@@ -5,6 +5,9 @@
 // background.js. Also runs in Overleaf's "PDF in separate tab"
 // (/project/<id>/detached): that tab shows the pages, the editor tab sends
 // the edits.
+// SyncTeX: the editor cursor is shown as a caret on the live page (the PDF
+// scrolls only when the caret is out of view); a double-click on a live
+// page moves the editor cursor there.
 (() => {
   const TAG = "__overleafLive";
   const match = location.pathname.match(/^\/project\/([0-9a-f]{24})(\/detached)?/);
@@ -28,6 +31,11 @@
   let view = { first: -1, last: -1 };        // visible pages last sent
   let status = { text: "not connected", busy: false };
   let errors = [];
+  let caret = null;              // {page, x, y, h, d} in points, from the helper
+  let lastCursorMove = 0;        // when the editor cursor last moved
+  let caretTimer = null;
+  let pendingGoto = null;        // reverse search waiting for a file to open
+  let docId = null;              // the file open in the editor (Overleaf's id)
 
   // --- the viewer and the Live button ---------------------------------
   const ui = document.createElement("div");
@@ -125,6 +133,7 @@
     // pages go away only when the document is finished (TeXpresso starts
     // again from page 1 for its second pass)
     setSlotCount(done ? want : Math.max(want, slots().length));
+    if (caret && !caretEl.parentElement) placeCaret(false);
     writeToolbar();
     checkView();
   }
@@ -174,6 +183,92 @@
       const css = pageSize.w * PT * scale();
       send({ type: "width", width: Math.min(4000, Math.round(css * (window.devicePixelRatio || 1))) });
     }, 150);
+  }
+
+  // --- the editor cursor in the PDF (SyncTeX) -----------------------------
+  const caretEl = document.createElement("div");
+  caretEl.className = "olive-caret";
+
+  function placeCaret(follow) {
+    if (!caret || !settings.on) {
+      caretEl.remove();
+      return;
+    }
+    if (caret.page >= slots().length) setSlotCount(caret.page + 1);
+    const slot = slots()[caret.page];
+    if (!slot) return;
+    const w = +slot.dataset.w || pageSize.w, h = +slot.dataset.h || pageSize.h;
+    caretEl.style.left = (caret.x / w * 100) + "%";
+    caretEl.style.top = ((caret.y - caret.h) / h * 100) + "%";
+    caretEl.style.height = (Math.max(caret.h + caret.d, 4) / h * 100) + "%";
+    if (caretEl.parentElement !== slot) slot.appendChild(caretEl);
+    caretEl.classList.remove("olive-caret-stale");
+    // start the blink again, as an editor caret does after a move
+    caretEl.style.animation = "none";
+    void caretEl.offsetWidth;
+    caretEl.style.animation = "";
+    if (follow) followCaret();
+  }
+
+  // scroll only when the caret is out of view: then put it a third down
+  function followCaret() {
+    const r = caretEl.getBoundingClientRect(), b = scroller.getBoundingClientRect();
+    if (!r.height) return;
+    const margin = 16;
+    let dy = 0, dx = 0;
+    if (r.top < b.top + margin || r.bottom > b.bottom - margin)
+      dy = r.top - (b.top + b.height / 3);
+    if (r.left < b.left + margin || r.right > b.right - margin)
+      dx = r.left - (b.left + b.width / 2);
+    if (dx || dy) {
+      scroller.scrollBy({ top: dy, left: dx });
+      checkView();
+    }
+  }
+
+  // reverse search: a double-click on a live page
+  pages.addEventListener("dblclick", (e) => {
+    const slot = e.target.closest(".olive-slot");
+    if (!slot || !connected) return;
+    const index = Array.prototype.indexOf.call(slots(), slot);
+    const r = slot.getBoundingClientRect();
+    const w = +slot.dataset.w || pageSize.w, h = +slot.dataset.h || pageSize.h;
+    const x = (e.clientX - r.left) / r.width * w, y = (e.clientY - r.top) / r.height * h;
+    e.preventDefault();
+    const sel = window.getSelection();
+    if (sel) sel.removeAllRanges();
+    send({ type: "scan", page: index, x, y });
+  });
+
+  // the file tree item of a project path (or null)
+  function treeItemOf(path) {
+    for (const el of document.querySelectorAll("[data-file-id]"))
+      if (pathOf(el.getAttribute("data-file-id")) === path) return el;
+    return null;
+  }
+
+  function gotoSource(msg) {
+    if (detached) return;            // the editor tab does it
+    const cmd = { [TAG + "Cmd"]: "goto", line: msg.line, column: msg.column };
+    if (docId && pathOf(docId) === msg.path) {
+      window.postMessage({ ...cmd, docId }, location.origin);
+      return;
+    }
+    const item = treeItemOf(msg.path);
+    if (!item) {
+      setStatus(`can't open ${msg.path}: not in the file tree (open its folder)`, false);
+      return;
+    }
+    pendingGoto = { ...cmd, docId: item.getAttribute("data-file-id") };
+    item.click();
+    // if Overleaf does not report the file as opened, try anyway
+    const mine = pendingGoto;
+    setTimeout(() => {
+      if (pendingGoto === mine) {
+        pendingGoto = null;
+        window.postMessage(mine, location.origin);
+      }
+    }, 2500);
   }
 
   // --- which pages are in view ------------------------------------------
@@ -488,6 +583,19 @@
         errors = msg.lines;
         showStatus();
         break;
+      case "caret":
+        clearTimeout(caretTimer);
+        if (!(msg.h + msg.d > 0.5)) {
+          // the line typesets no text (e.g. \begin{figure}): no position
+          caretEl.classList.add("olive-caret-stale");
+          break;
+        }
+        caret = msg;
+        placeCaret(Date.now() - lastCursorMove < 3000);
+        break;
+      case "goto":
+        gotoSource(msg);
+        break;
     }
   }
 
@@ -507,6 +615,8 @@
     if (!settings.on) {
       disconnect();
       menu.hidden = true;
+      caret = null;
+      caretEl.remove();
       if (was) restoreToolbar();
     }
     if (settings.on) { applyZoom(); checkView(); }
@@ -566,13 +676,28 @@
   }
 
   // --- edits from page.js -------------------------------------------
-  let docId = null;
   window.addEventListener("message", (evt) => {
     if (evt.source !== window || !evt.data || !evt.data[TAG]) return;
     const msg = evt.data;
     if (msg.kind === "opened") {
       if (docId && msg.docId !== docId && settings.on) sync(false);  // other files may have changed
       docId = msg.docId;
+      if (pendingGoto && pendingGoto.docId === docId) {
+        const cmd = pendingGoto;
+        pendingGoto = null;
+        setTimeout(() => window.postMessage(cmd, location.origin), 150);
+      }
+      return;
+    }
+    if (msg.kind === "cursor") {
+      if (!settings.on || !connected) return;
+      const path = pathOf(msg.docId);
+      if (!path || !/\.(tex|ltx|sty|cls)$/i.test(path)) return;
+      lastCursorMove = Date.now();
+      send({ type: "cursor", path, line: msg.line, column: msg.column });
+      // no answer: the cursor is in text that is not on a page (yet)
+      clearTimeout(caretTimer);
+      caretTimer = setTimeout(() => caretEl.classList.add("olive-caret-stale"), 1500);
       return;
     }
     if (msg.kind !== "doc" || !settings.on || !connected) return;

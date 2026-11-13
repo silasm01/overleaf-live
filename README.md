@@ -80,7 +80,11 @@ It gets the newest version from GitHub, rebuilds TeXpresso only when its patch c
    - **Lua results**: for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn it on only for projects you trust (yours). The setting is saved for each project.
    - **Sync files**: sends all project files again. The extension does this automatically when you open another file. Overleaf allows 10 downloads a minute, so the extension waits at least 10 seconds between syncs.
    - **Turn off Live**: Overleaf's own PDF and toolbar again.
-5. **PDF in a separate tab**: use Overleaf's **Layout → PDF in separate tab**. The editor tab sends the edits, and the separate tab shows the live pages with the same toolbar. Turning Live on or off in one tab changes both. You can drag the tab out to its own window.
+5. **Cursor in the PDF (SyncTeX)**: an orange caret on the live page shows where the editor cursor is. It moves when you move the cursor or type. The PDF scrolls only when the caret is out of view. A **double-click** on a live page moves the editor cursor to that text, and opens its file when it is another file. Overleaf's two arrow buttons between the editor and the PDF still use Overleaf's own compiled PDF.
+   - In normal text, the caret is correct to about one character. Inside a command argument (for example `\emph{...}` or a heading), the position is only approximate in that argument. Math is one position for each formula.
+   - A line that typesets no text (for example `\begin{figure}`) has no position: the caret becomes pale.
+   - A double-click can open only a file that is visible in the file tree: open its folder first.
+6. **PDF in a separate tab**: use Overleaf's **Layout → PDF in separate tab**. The editor tab sends the edits, and the separate tab shows the live pages with the same toolbar. Turning Live on or off in one tab changes both. You can drag the tab out to its own window.
 
 The project's copy on your PC is in `~/.overleaf-live/<project id>/` in WSL.
 
@@ -92,7 +96,6 @@ The project's copy on your PC is in `~/.overleaf-live/<project id>/` in WSL.
 
 ## Limits of this prototype
 
-- There is no SyncTeX (the arrows between the editor and the PDF, or a double-click on the page) yet.
 - Overleaf's toolbar must be there: it shows when Overleaf has compiled a PDF of the project at least once.
 - After an edit, pages that are not in view are updated when you scroll to them.
 - The extension uses Overleaf's unsupported hook for extensions (`UNSTABLE_editor:extensions`). An Overleaf update can break it.
