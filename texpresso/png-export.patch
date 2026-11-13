@@ -1,16 +1,392 @@
-From ddac198167453b3e84f25e4ee26d8496364fb931 Mon Sep 17 00:00:00 2001
+From 8f3be9f9a2ae90147d149446277affb1f6b871fb Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  commands, .tex in -I paths, TeX Live pictures
 
 ---
- src/frontend/editor.c     |  44 ++++++++++++
- src/frontend/editor.h     |  16 +++++
- src/frontend/engine_tex.c |  71 ++++++++++++++++++
- src/frontend/main.c       | 148 ++++++++++++++++++++++++++++++++++++++
- 4 files changed, 279 insertions(+)
+ src/dvi/dvi_prim.c         |   4 +-
+ src/dvi/dvi_resmanager.c   |  62 ++++++++++++++-
+ src/dvi/dvi_special.c      |  48 ++++++++----
+ src/dvi/dvi_special.re2c.c |  48 ++++++++----
+ src/dvi/mydvi.h            |   2 +
+ src/frontend/editor.c      |  44 +++++++++++
+ src/frontend/editor.h      |  16 ++++
+ src/frontend/engine_tex.c  |  71 +++++++++++++++++
+ src/frontend/main.c        | 155 +++++++++++++++++++++++++++++++++++++
+ 9 files changed, 421 insertions(+), 29 deletions(-)
 
+diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
+index 92548a0..06c869e 100644
+--- a/src/dvi/dvi_prim.c
++++ b/src/dvi/dvi_prim.c
+@@ -37,7 +37,7 @@ static void output_fill_rect(fz_context *ctx, dvi_context *dc, dvi_state *st, in
+     fz_path *path = fz_new_path(ctx);
+     fz_rectto(ctx, path, x0 * s, - y0 * s, x1 * s, - y1 * s);
+     fz_fill_path(ctx, dc->dev, path, 0, st->gs.ctm, fz_device_rgb(ctx),
+-                 st->gs.colors.fill, 1.0, color_params);
++                 st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+     fz_drop_path(ctx, path);
+   }
+ }
+@@ -61,7 +61,7 @@ void dvi_context_flush_text(fz_context *ctx, dvi_context *dc, dvi_state *st)
+     if (!dc->dev)
+       abort();
+     fz_fill_text(ctx, dc->dev, dc->text, fz_identity, fz_device_rgb(ctx),
+-        st->gs.colors.fill, 1.0, color_params);
++        st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+     fz_drop_text(ctx, dc->text);
+     dc->text = NULL;
+   }
+diff --git a/src/dvi/dvi_resmanager.c b/src/dvi/dvi_resmanager.c
+index f702dfa..df97614 100644
+--- a/src/dvi/dvi_resmanager.c
++++ b/src/dvi/dvi_resmanager.c
+@@ -101,6 +101,39 @@ static const char* kind_to_string(dvi_reskind kind)
+   }
+ }
+ 
++
++// A picture that isn't in the document's folder may come with TeX Live
++// (e.g. example-image-a.pdf from mwe): ask kpsewhich. Results are
++// remembered, also when nothing was found. Returns NULL or a path that
++// stays valid.
++static const char *kpse_find_picture(const char *name)
++{
++  enum { N = 64 };
++  static char names[N][256], found[N][1024];
++  static int count = 0;
++  if (strlen(name) >= 256 || strchr(name, '\'') || strchr(name, '"'))
++    return NULL;
++  for (int i = 0; i < count; i++)
++    if (strcmp(names[i], name) == 0)
++      return found[i][0] ? found[i] : NULL;
++  char cmd[512], result[1024] = "";
++  snprintf(cmd, sizeof(cmd), "kpsewhich '%s' 2>/dev/null", name);
++  FILE *f = popen(cmd, "r");
++  if (f)
++  {
++    if (!fgets(result, sizeof(result), f))
++      result[0] = '\0';
++    pclose(f);
++  }
++  result[strcspn(result, "\r\n")] = '\0';
++  if (count >= N)
++    return NULL;
++  snprintf(names[count], 256, "%s", name);
++  snprintf(found[count], 1024, "%s", result);
++  count++;
++  return found[count - 1][0] ? found[count - 1] : NULL;
++}
++
+ static fz_stream *
+ tectonic_hooks_open_file(fz_context *ctx, void *env, dvi_reskind kind, const char *name)
+ {
+@@ -136,6 +169,16 @@ tectonic_hooks_open_file(fz_context *ctx, void *env, dvi_reskind kind, const cha
+         else
+           memcpy(path + root_len, name, name_len);
+         path[len] = 0;
++        if (access(path, R_OK) != 0)
++        {
++          const char *kp = kpse_find_picture(name);
++          if (kp)
++          {
++            free(path);
++            path = (char *)kp;
++            free_path = 0;
++          }
++        }
+       }
+       break;
+ 
+@@ -278,6 +321,16 @@ texlive_hooks_open_file(fz_context *ctx, void *env, dvi_reskind kind, const char
+         else
+           memcpy(path + root_len, name, name_len);
+         path[len] = 0;
++        if (access(path, R_OK) != 0)
++        {
++          const char *kp = kpse_find_picture(name);
++          if (kp)
++          {
++            free(path);
++            path = (char *)kp;
++            free_path = 0;
++          }
++        }
+       }
+       break;
+ 
+@@ -823,7 +876,14 @@ fz_image *dvi_resmanager_get_img(fz_context *ctx, dvi_resmanager *rm, const char
+     pname = fz_strdup(ctx, filename);
+     cell->name = pname;
+     cell->next = rm->first_image;
+-    cell->img = fz_new_image_from_file(ctx, filename);
++    const char *file = filename;
++    if (access(file, R_OK) != 0)
++    {
++      const char *kp = kpse_find_picture(filename);
++      if (kp)
++        file = kp;
++    }
++    cell->img = fz_new_image_from_file(ctx, file);
+   }
+   fz_catch(ctx)
+   {
+diff --git a/src/dvi/dvi_special.c b/src/dvi/dvi_special.c
+index 516e30d..9e98efb 100644
+--- a/src/dvi/dvi_special.c
++++ b/src/dvi/dvi_special.c
+@@ -3010,9 +3010,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_path *path = get_path(ctx, dc);
+             fz_closepath(ctx, path);
+             fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3026,9 +3026,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_path *path = get_path(ctx, dc);
+             fz_closepath(ctx, path);
+             fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3041,9 +3041,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             get_stroke_state(ctx, st, &stst);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3056,9 +3056,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             get_stroke_state(ctx, st, &stst);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.fill, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3070,7 +3070,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_matrix ctm = dvi_get_ctm(dc, st);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3081,7 +3081,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_matrix ctm = dvi_get_ctm(dc, st);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3094,7 +3094,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             get_stroke_state(ctx, st, &stst);
+             fz_path *path = get_path(ctx, dc);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3108,7 +3108,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_path *path = get_path(ctx, dc);
+             fz_closepath(ctx, path);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -3166,9 +3166,31 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+           break;
+         }
+ 
++        case PDF_OP_gs:
++        {
++          // An ExtGState, by name: only opacity is supported. PGF (TikZ,
++          // circuitikz, pgfplots) names them after the value: /pgf@CA0.5
++          // is a stroke opacity of 0.5, /pgf@ca0.5 a fill opacity;
++          // transparent.sty uses /TRP0.5 for both.
++          val v[1];
++          vstack_get_arguments(ctx, stack, v, 1);
++          const char *name = val_as_name(ctx, stack, v[0]);
++          if (!name)
++            break;
++          if (name[0] == '/')
++            name++;
++          float a;
++          if (strncmp(name, "pgf@CA", 6) == 0 && sscanf(name + 6, "%f", &a) == 1)
++            st->gs.stroke_transp = 1 - fz_clamp(a, 0, 1);
++          else if (strncmp(name, "pgf@ca", 6) == 0 && sscanf(name + 6, "%f", &a) == 1)
++            st->gs.fill_transp = 1 - fz_clamp(a, 0, 1);
++          else if (strncmp(name, "TRP", 3) == 0 && sscanf(name + 3, "%f", &a) == 1)
++            st->gs.fill_transp = st->gs.stroke_transp = 1 - fz_clamp(a, 0, 1);
++          break;
++        }
++
+         case PDF_OP_ri:
+         case PDF_OP_i:
+-        case PDF_OP_gs:
+         case PDF_OP_v:
+         case PDF_OP_y:
+         case PDF_OP_BT:
+diff --git a/src/dvi/dvi_special.re2c.c b/src/dvi/dvi_special.re2c.c
+index f4878b6..1c2fa4d 100644
+--- a/src/dvi/dvi_special.re2c.c
++++ b/src/dvi/dvi_special.re2c.c
+@@ -885,9 +885,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_path *path = get_path(ctx, dc);
+             fz_closepath(ctx, path);
+             fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -901,9 +901,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_path *path = get_path(ctx, dc);
+             fz_closepath(ctx, path);
+             fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -916,9 +916,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             get_stroke_state(ctx, st, &stst);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -931,9 +931,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             get_stroke_state(ctx, st, &stst);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.fill, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -945,7 +945,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_matrix ctm = dvi_get_ctm(dc, st);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -956,7 +956,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_matrix ctm = dvi_get_ctm(dc, st);
+             fz_path *path = get_path(ctx, dc);
+             fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
+-                         st->gs.colors.fill, 1.0, color_params);
++                         st->gs.colors.fill, 1 - st->gs.fill_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -969,7 +969,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             get_stroke_state(ctx, st, &stst);
+             fz_path *path = get_path(ctx, dc);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -983,7 +983,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+             fz_path *path = get_path(ctx, dc);
+             fz_closepath(ctx, path);
+             fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
+-                           st->gs.colors.line, 1.0, color_params);
++                           st->gs.colors.line, 1 - st->gs.stroke_transp, color_params);
+           }
+           drop_path(ctx, dc);
+           break;
+@@ -1041,9 +1041,31 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+           break;
+         }
+ 
++        case PDF_OP_gs:
++        {
++          // An ExtGState, by name: only opacity is supported. PGF (TikZ,
++          // circuitikz, pgfplots) names them after the value: /pgf@CA0.5
++          // is a stroke opacity of 0.5, /pgf@ca0.5 a fill opacity;
++          // transparent.sty uses /TRP0.5 for both.
++          val v[1];
++          vstack_get_arguments(ctx, stack, v, 1);
++          const char *name = val_as_name(ctx, stack, v[0]);
++          if (!name)
++            break;
++          if (name[0] == '/')
++            name++;
++          float a;
++          if (strncmp(name, "pgf@CA", 6) == 0 && sscanf(name + 6, "%f", &a) == 1)
++            st->gs.stroke_transp = 1 - fz_clamp(a, 0, 1);
++          else if (strncmp(name, "pgf@ca", 6) == 0 && sscanf(name + 6, "%f", &a) == 1)
++            st->gs.fill_transp = 1 - fz_clamp(a, 0, 1);
++          else if (strncmp(name, "TRP", 3) == 0 && sscanf(name + 3, "%f", &a) == 1)
++            st->gs.fill_transp = st->gs.stroke_transp = 1 - fz_clamp(a, 0, 1);
++          break;
++        }
++
+         case PDF_OP_ri:
+         case PDF_OP_i:
+-        case PDF_OP_gs:
+         case PDF_OP_v:
+         case PDF_OP_y:
+         case PDF_OP_BT:
+diff --git a/src/dvi/mydvi.h b/src/dvi/mydvi.h
+index e2f2105..4a4eef6 100644
+--- a/src/dvi/mydvi.h
++++ b/src/dvi/mydvi.h
+@@ -284,6 +284,8 @@ typedef struct
+   float dash[4];
+   int dash_len;
+   float dash_phase;
++  // 1 - opacity, set by "gs" (0, the default, is opaque)
++  float fill_transp, stroke_transp;
+   int h, v;
+ } dvi_graphicstate;
+ 
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
 index 6face98..665e8a9 100644
 --- a/src/frontend/editor.c
@@ -197,7 +573,7 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..5f30605 100644
+index c202294..7355134 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
 @@ -917,6 +917,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
@@ -326,7 +702,7 @@ index c202294..5f30605 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1134,6 +1253,30 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1253,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -334,6 +710,9 @@ index c202294..5f30605 100644
 +    case EDIT_EXPORT_PNG:
 +      snprintf(export_dir, sizeof(export_dir), "%s", cmd.export_png.dir);
 +      export_width = cmd.export_png.width;
++      // hairlines (e.g. TikZ "very thin") at least one pixel wide, as in
++      // PDF viewers
++      fz_set_graphics_min_line_width(ps->ctx, 1.0f);
 +      export_forget();
 +      export_reported_count = -1;
 +      fprintf(stderr, "[command] export-png %s %d\n", export_dir, export_width);
@@ -357,7 +736,7 @@ index c202294..5f30605 100644
    }
  }
  
-@@ -1353,6 +1496,10 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +1499,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -365,10 +744,14 @@ index c202294..5f30605 100644
 +      else if (export_dir[0] && after_page_count > before_page_count &&
 +               export_last >= before_page_count && export_first < after_page_count)
 +        schedule_event(RELOAD_EVENT);
++      // the document was finished: report the final page count
++      else if (export_dir[0] && export_reported_done != 1 &&
++               send(get_status, ui->eng) == DOC_TERMINATED)
++        schedule_event(RELOAD_EVENT);
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1680,6 +1827,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +1834,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);

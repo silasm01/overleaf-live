@@ -78,6 +78,8 @@ else
   git checkout -q -f "$TEXPRESSO_COMMIT"
   git -c user.name=overleaf-live -c user.email=none am -q "$HERE/texpresso/png-export.patch"
   make config >/dev/null
+  # a clean build: make doesn't rebuild what depends on a changed header
+  make clean >/dev/null
   make all
   echo "$PATCH_ID" > "$HOME/texpresso/.overleaf-live-patch"
   REBUILT=1

@@ -13,7 +13,7 @@ Overleaf tab (Chrome)                     WSL (Ubuntu)
 Folders:
 - `extension/`: the Chrome extension
 - `helper/overleaf_live.py`: the helper (runs in WSL)
-- `texpresso/png-export.patch`: changes TeXpresso so it renders the visible pages to PNG files, finds `.tex` files in `-I` folders, and finds pictures in TeX Live
+- `texpresso/png-export.patch`: changes TeXpresso so it renders the visible pages to PNG files, finds `.tex` files in `-I` folders and pictures in TeX Live, draws transparency (TikZ `opacity`) and hairlines of at least one pixel, and reports the end of the document
 - `install.sh`: installs everything in WSL
 - `update.sh`: gets the newest version from GitHub and installs it
 
