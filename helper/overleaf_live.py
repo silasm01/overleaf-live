@@ -19,7 +19,7 @@ Messages (JSON, one per WebSocket message)
     {"type": "hello", "project": id, "main": "main.tex", "lua": bool}
     {"type": "project", "zip": base64}       the whole project
     {"type": "edit", "path": "main.tex", "text": "..."}
-    {"type": "page", "page": n}              show page n (from 0)
+    {"type": "view", "first": n, "last": n}  the visible pages (from 0)
     {"type": "width", "width": px}           picture width in pixels
     {"type": "lua", "on": bool}
   helper -> extension
@@ -27,6 +27,7 @@ Messages (JSON, one per WebSocket message)
                                              in the Windows folder
     {"type": "status", "text": "...", "busy": bool}
     {"type": "page", "page": n, "count": n, "done": bool, "png": base64}
+    {"type": "count", "count": n, "done": bool}   pages so far; done: all
     {"type": "errors", "lines": ["...", ...]}
 """
 import asyncio
@@ -77,7 +78,8 @@ class Session:
         self.main = "main.tex"
         self.lua = False
         self.width = 1000
-        self.page = 0
+        self.first = 0              # the visible pages
+        self.last = 0
         self.proc = None
         self.reader = None
         self.out = ""               # TeXpresso's terminal output (for errors)
@@ -161,7 +163,7 @@ class Session:
         self.sent_errors = None
         self.reader = asyncio.create_task(self.read_texpresso(self.proc))
         await self.command(f"(export-png {sexp_string(str(self.export_dir))} {int(self.width)})")
-        await self.command(f"(goto-page {self.page})")
+        await self.command(f"(export-range {self.first} {self.last})")
         await self.command("(rescan)")
         await self.status("typesetting", True)
 
@@ -189,6 +191,7 @@ class Session:
 
     async def read_texpresso(self, proc):
         page_re = re.compile(r'^\(page-image (\d+) (\d+) (\d) "(.*)"\)$')
+        count_re = re.compile(r'^\(page-count (\d+) (\d)\)$')
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
@@ -204,9 +207,12 @@ class Session:
                     os.unlink(path)
                 except OSError:
                     continue
-                if page == self.page:
-                    await self.send({"type": "page", "page": page, "count": count,
-                                     "done": done, "png": base64.b64encode(data).decode()})
+                await self.send({"type": "page", "page": page, "count": count,
+                                 "done": done, "png": base64.b64encode(data).decode()})
+                continue
+            m = count_re.match(line)
+            if m:
+                await self.send({"type": "count", "count": int(m[1]), "done": m[2] == "1"})
                 continue
             m = append_re.match(line)
             if m:
@@ -327,9 +333,10 @@ class Session:
         await self.command(f"(open {sexp_string(rel)} {sexp_string(text)})")
         self.schedule_lua()
 
-    async def on_page(self, msg):
-        self.page = max(0, int(msg.get("page", 0)))
-        await self.command(f"(goto-page {self.page})")
+    async def on_view(self, msg):
+        self.first = max(0, int(msg.get("first", 0)))
+        self.last = max(self.first, min(self.first + 20, int(msg.get("last", self.first))))
+        await self.command(f"(export-range {self.first} {self.last})")
 
     async def on_width(self, msg):
         self.width = max(200, min(4000, int(msg.get("width", 1000))))
@@ -344,7 +351,7 @@ class Session:
 
     async def run(self):
         handlers = {"hello": self.on_hello, "project": self.on_project,
-                    "edit": self.on_edit, "page": self.on_page,
+                    "edit": self.on_edit, "view": self.on_view,
                     "width": self.on_width, "lua": self.on_lua}
         try:
             async for raw in self.ws:

@@ -12,9 +12,11 @@
   let connected = false;
   let docId = null;
   let lastText = new Map();     // path -> text last sent
-  let page = 0;
-  let pageCount = 0;
-  let done = false;
+  let pageCount = 0;           // pages typeset so far
+  let done = false;            // true: the document is finished, pageCount is all
+  let knownTotal = 0;          // pages when the document was last finished
+  let zoom = 1;                // 1: page width = pane width
+  let view = { first: -1, last: -1 };   // visible pages last sent
   let lastSync = 0;
   let syncTimer = null;
   let widthTimer = null;
@@ -26,9 +28,12 @@
     <button class="olive-toggle" title="Live preview by TeXpresso on your PC">Live</button>
     <div class="olive-pane" hidden>
       <div class="olive-bar">
-        <button class="olive-prev" title="Previous page (Page Up)">&lsaquo;</button>
+        <button class="olive-prev" title="Previous page">&lsaquo;</button>
         <span class="olive-page">–</span>
-        <button class="olive-next" title="Next page (Page Down)">&rsaquo;</button>
+        <button class="olive-next" title="Next page">&rsaquo;</button>
+        <button class="olive-zoomout" title="Zoom out (Ctrl + wheel)">&minus;</button>
+        <button class="olive-fit" title="Fit width">Fit</button>
+        <button class="olive-zoomin" title="Zoom in (Ctrl + wheel)">+</button>
         <span class="olive-status">not connected</span>
         <span class="olive-spacer"></span>
         <label title="Runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust.">
@@ -36,18 +41,113 @@
         <button class="olive-sync" title="Send all project files again">Sync</button>
       </div>
       <div class="olive-errors" hidden></div>
-      <div class="olive-scroll"><img class="olive-img" alt=""></div>
+      <div class="olive-scroll" tabindex="0"><div class="olive-pages"></div></div>
     </div>`;
   const $ = (sel) => ui.querySelector(sel);
-  const pane = $(".olive-pane"), img = $(".olive-img"), scroller = $(".olive-scroll");
+  const pane = $(".olive-pane"), scroller = $(".olive-scroll"), pages = $(".olive-pages");
 
   function setStatus(text, busy) {
     $(".olive-status").textContent = text;
     $(".olive-status").classList.toggle("olive-busy", !!busy);
   }
 
+  // One slot per page, one under the other as in Overleaf. While the
+  // document isn't finished, one more empty slot: when it comes into view,
+  // TeXpresso typesets the next page.
+  function slots() { return pages.children; }
+
+  function setSlotCount(n) {
+    while (slots().length < n) {
+      const slot = document.createElement("div");
+      slot.className = "olive-slot";
+      slot.appendChild(document.createElement("img"));
+      pages.appendChild(slot);
+    }
+    while (slots().length > n) pages.lastChild.remove();
+  }
+
+  function updateSlots() {
+    if (done) knownTotal = pageCount;
+    const want = done ? pageCount : pageCount + 1;
+    // pages go away only when the document is finished (TeXpresso starts
+    // again from page 1 for its second pass)
+    setSlotCount(done ? want : Math.max(want, slots().length));
+    showPageNumber();
+    checkView();
+  }
+
+  function slotWidth() {
+    return Math.max(100, Math.round((scroller.clientWidth - 24) * zoom));
+  }
+
+  function applyZoom() {
+    pages.style.width = slotWidth() + "px";
+    $(".olive-fit").classList.toggle("olive-on", zoom === 1);
+    sendWidth();
+  }
+
+  // the first and last page in view
+  function visibleRange() {
+    const box = scroller.getBoundingClientRect();
+    let first = -1, last = -1;
+    for (let i = 0; i < slots().length; i++) {
+      const r = slots()[i].getBoundingClientRect();
+      if (r.bottom >= box.top && r.top <= box.bottom) {
+        if (first < 0) first = i;
+        last = i;
+      } else if (first >= 0) break;
+    }
+    return { first: Math.max(first, 0), last: Math.max(last, first, 0) };
+  }
+
+  function currentPage() {
+    const box = scroller.getBoundingClientRect();
+    for (let i = 0; i < slots().length; i++)
+      if (slots()[i].getBoundingClientRect().bottom > box.top + box.height / 3) return i;
+    return 0;
+  }
+
   function showPageNumber() {
-    $(".olive-page").textContent = `${page + 1} / ${pageCount}${done ? "" : "+"}`;
+    // while TeXpresso typesets again after an edit, show the last total
+    const total = done ? pageCount : Math.max(pageCount, knownTotal);
+    const more = !done && pageCount >= knownTotal;
+    const n = Math.min(currentPage() + 1, Math.max(total, 1));
+    $(".olive-page").textContent = `${n} / ${total}${more ? "+" : ""}`;
+  }
+
+  // tell the helper which pages are in view (plus one below, so that
+  // scrolling down shows a finished page)
+  let viewFrame = 0;
+  function checkView() {
+    if (viewFrame) return;
+    viewFrame = requestAnimationFrame(() => {
+      viewFrame = 0;
+      if (pane.hidden) return;
+      const r = visibleRange();
+      r.last += 1;
+      if (r.first !== view.first || r.last !== view.last) {
+        view = r;
+        send({ type: "view", first: r.first, last: r.last });
+      }
+      showPageNumber();
+    });
+  }
+  scroller.addEventListener("scroll", checkView, { passive: true });
+
+  function gotoPage(n) {
+    if (n < 0 || n >= slots().length) return;
+    scroller.scrollTo({ top: slots()[n].offsetTop - 8 });
+  }
+
+  // zoom around the middle of the view
+  function setZoom(z) {
+    z = Math.min(4, Math.max(0.3, z));
+    if (z === zoom) return;
+    const mid = (scroller.scrollTop + scroller.clientHeight / 2) / (scroller.scrollHeight || 1);
+    zoom = z;
+    applyZoom();
+    scroller.scrollTop = mid * scroller.scrollHeight - scroller.clientHeight / 2;
+    checkView();
   }
 
   // Overleaf redraws its panes; put the UI back when it disappears
@@ -56,42 +156,39 @@
     if (host && ui.parentElement !== host) {
       if (getComputedStyle(host).position === "static") host.style.position = "relative";
       host.appendChild(ui);
-      sendWidth();
+      applyZoom();
     }
   }
   new MutationObserver(attach).observe(document.body, { childList: true, subtree: true });
   attach();
 
   $(".olive-toggle").addEventListener("click", () => setOn(!settings.on));
-  $(".olive-prev").addEventListener("click", () => gotoPage(page - 1));
-  $(".olive-next").addEventListener("click", () => gotoPage(page + 1));
+  $(".olive-prev").addEventListener("click", () => gotoPage(currentPage() - 1));
+  $(".olive-next").addEventListener("click", () => gotoPage(currentPage() + 1));
+  $(".olive-zoomin").addEventListener("click", () => setZoom(zoom * 1.25));
+  $(".olive-zoomout").addEventListener("click", () => setZoom(zoom / 1.25));
+  $(".olive-fit").addEventListener("click", () => setZoom(1));
+  scroller.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    setZoom(zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+  }, { passive: false });
   $(".olive-sync").addEventListener("click", () => sync(true));
   $(".olive-lua").addEventListener("change", (e) => {
     settings.lua = e.target.checked;
     save();
     send({ type: "lua", on: settings.lua });
   });
-  pane.addEventListener("keydown", (e) => {
-    if (e.key === "PageDown") { gotoPage(page + 1); e.preventDefault(); }
-    if (e.key === "PageUp") { gotoPage(page - 1); e.preventDefault(); }
-  });
-  pane.tabIndex = 0;
 
-  function gotoPage(n) {
-    if (n < 0 || (done && n >= pageCount)) return;
-    page = n;
-    showPageNumber();
-    send({ type: "page", page });
-  }
-
+  // pictures are made for the page width on screen (sharp on HiDPI)
   function sendWidth() {
     clearTimeout(widthTimer);
     widthTimer = setTimeout(() => {
-      const w = Math.round((scroller.clientWidth || 800) * (window.devicePixelRatio || 1));
+      const w = Math.min(4000, Math.round(slotWidth() * (window.devicePixelRatio || 1)));
       send({ type: "width", width: w });
     }, 150);
   }
-  new ResizeObserver(sendWidth).observe(ui);
+  new ResizeObserver(() => { applyZoom(); checkView(); }).observe(scroller);
 
   // --- connection ---------------------------------------------------
   function send(msg) {
@@ -126,7 +223,8 @@
     lastText.clear();
     send({ type: "hello", project: projectId, main: settings.main, lua: settings.lua });
     sendWidth();
-    send({ type: "page", page });
+    view = { first: -1, last: -1 };
+    checkView();
     sync(true);
   }
 
@@ -145,12 +243,20 @@
         setStatus(msg.text, msg.busy);
         break;
       case "page":
-        if (msg.page !== page) break;
-        img.src = "data:image/png;base64," + msg.png;
-        pageCount = Math.max(msg.count, page + 1);
+        pageCount = Math.max(msg.count, msg.page + 1);
         done = msg.done;
-        showPageNumber();
+        updateSlots();
+        if (slots()[msg.page]) {
+          const img = slots()[msg.page].firstChild;
+          img.src = "data:image/png;base64," + msg.png;
+          slots()[msg.page].classList.add("olive-loaded");
+        }
         if (!$(".olive-status").classList.contains("olive-busy")) setStatus("live", false);
+        break;
+      case "count":
+        pageCount = msg.count;
+        done = msg.done;
+        updateSlots();
         break;
       case "errors": {
         const box = $(".olive-errors");
@@ -166,7 +272,7 @@
     save();
     pane.hidden = !on;
     $(".olive-toggle").classList.toggle("olive-active", on);
-    if (on) { connect(); sendWidth(); }
+    if (on) { connect(); applyZoom(); }
     else disconnect();
   }
 

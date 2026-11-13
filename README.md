@@ -13,7 +13,7 @@ Overleaf tab (Chrome)                     WSL (Ubuntu)
 Folders:
 - `extension/`: the Chrome extension
 - `helper/overleaf_live.py`: the helper (runs in WSL)
-- `texpresso/png-export.patch`: adds two commands to TeXpresso (render a page to PNG, go to a page)
+- `texpresso/png-export.patch`: changes TeXpresso so it renders the visible pages to PNG files, finds `.tex` files in `-I` folders, and finds pictures in TeX Live
 - `install.sh`: installs everything in WSL
 - `update.sh`: gets the newest version from GitHub and installs it
 
@@ -74,7 +74,7 @@ It gets the newest version from GitHub, rebuilds TeXpresso only when its patch c
 
 1. Open an Overleaf project. Click **Live** (bottom right of the PDF pane).
 2. The viewer covers Overleaf's PDF pane. Click **Live** again to see Overleaf's PDF.
-3. ◀ ▶ (or Page Up / Page Down) go to another page. TeXpresso typesets only up to the page you look at, so `2 / 3+` means "page 2, at least 3 pages".
+3. The pages are one under the other, as in Overleaf. Scroll, or use ‹ › to go to the previous or next page. **−**, **Fit** and **+** (or Ctrl + mouse wheel) change the zoom. TeXpresso typesets up to the last page in view, so `2 / 3+` means "page 2, at least 3 pages". The pages under the visible ones are typeset when you scroll to them.
 4. **Lua**: for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn on Lua only for projects you trust (yours). The setting is saved for each project.
 5. **Sync** sends all project files again. The extension does this automatically when you open another file. Overleaf allows 10 downloads a minute, so the extension waits at least 10 seconds between syncs.
 
@@ -88,7 +88,8 @@ The project's copy on your PC is in `~/.overleaf-live/<project id>/` in WSL.
 
 ## Limits of this prototype
 
-- The picture always fits the width of the pane. There is no zoom and no SyncTeX (click to go to the source).
+- There is no SyncTeX (click on the page to go to the source) yet.
+- After an edit, pages that are not in view are updated when you scroll to them.
 - The extension uses Overleaf's unsupported hook for extensions (`UNSTABLE_editor:extensions`). An Overleaf update can break it.
 - The extension reads edits only for the open file, but these include edits by collaborators. Changes in other files come with the next Sync.
 - TeXpresso does not run BibTeX. With Lua on, the normal compile makes the `.bbl` file, and TeXpresso uses it.

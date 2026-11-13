@@ -1,21 +1,21 @@
-From fc9d23521863d10518acaae6290e866323f0dd3b Mon Sep 17 00:00:00 2001
+From f0dd5457cfcb873d202d0bb14308764a79795c04 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
-Subject: [PATCH] Add export-png and goto-page editor commands; try .tex in -I
- paths; find TeX Live pictures with kpsewhich
+Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
+ commands, .tex in -I paths, TeX Live pictures
 
 ---
- src/frontend/editor.c     | 29 +++++++++++++
- src/frontend/editor.h     | 11 +++++
- src/frontend/engine_tex.c | 71 ++++++++++++++++++++++++++++++
- src/frontend/main.c       | 90 +++++++++++++++++++++++++++++++++++++++
- 4 files changed, 201 insertions(+)
+ src/frontend/editor.c     |  44 ++++++++++++
+ src/frontend/editor.h     |  16 +++++
+ src/frontend/engine_tex.c |  71 +++++++++++++++++++
+ src/frontend/main.c       | 145 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 276 insertions(+)
 
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
-index 6face98..4d556e1 100644
+index 6face98..665e8a9 100644
 --- a/src/frontend/editor.c
 +++ b/src/frontend/editor.c
-@@ -219,6 +219,35 @@ bool editor_parse(fz_context *ctx,
+@@ -219,6 +219,50 @@ bool editor_parse(fz_context *ctx,
              .h = val_number(ctx, val_array_get(ctx, stack, command, 4)),
          }};
    }
@@ -35,6 +35,21 @@ index 6face98..4d556e1 100644
 +                       .width = val_number(ctx, width)},
 +    };
 +  }
++  else if (strcmp(verb, "export-range") == 0)
++  {
++    // (export-range first last): the pages to keep exported (from 0)
++    if (len != 3)
++      goto arity;
++    val first = val_array_get(ctx, stack, command, 1);
++    val last = val_array_get(ctx, stack, command, 2);
++    if (!val_is_number(first) || !val_is_number(last))
++      goto arguments;
++    *out = (struct editor_command){
++        .tag = EDIT_EXPORT_RANGE,
++        .export_range = {.first = val_number(ctx, first),
++                         .last = val_number(ctx, last)},
++    };
++  }
 +  else if (strcmp(verb, "goto-page") == 0)
 +  {
 +    // (goto-page n): show page n (counted from 0)
@@ -52,19 +67,20 @@ index 6face98..4d556e1 100644
    {
      if (len != 1)
 diff --git a/src/frontend/editor.h b/src/frontend/editor.h
-index 05fdd1c..0137f92 100644
+index 05fdd1c..8eb55a8 100644
 --- a/src/frontend/editor.h
 +++ b/src/frontend/editor.h
-@@ -37,6 +37,8 @@ enum EDITOR_COMMAND
+@@ -37,6 +37,9 @@ enum EDITOR_COMMAND
    EDIT_RESUME,
    EDIT_RERUN,
    EDIT_RERUN_ONCE,
 +  EDIT_EXPORT_PNG,
 +  EDIT_GOTO_PAGE,
++  EDIT_EXPORT_RANGE,
  };
  
  struct editor_change
-@@ -136,6 +138,15 @@ struct editor_command
+@@ -136,6 +139,19 @@ struct editor_command
  
      struct {
      } rerun_once;
@@ -77,6 +93,10 @@ index 05fdd1c..0137f92 100644
 +    struct {
 +      int page;
 +    } goto_page;
++
++    struct {
++      int first, last;
++    } export_range;
    };
  };
  
@@ -177,25 +197,44 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..1fc5d8e 100644
+index c202294..e12211b 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -917,10 +917,86 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +917,122 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
-+/* PNG export: each page shown is also rendered to a PNG file and
-+   reported on stdout, for front-ends that draw the pages themselves:
++/* PNG export, for front-ends that draw the pages themselves.
++   (export-png dir width) turns it on; (export-range first last) says which
++   pages are visible. The engine then runs up to the last of them, and each
++   visible page is rendered to a PNG in dir when it changes, reported as
 +     (page-image page page-count terminated "path")
-+   The front-end owns the file afterwards (it should delete it). */
++   The front-end owns the file afterwards (it should delete it).
++   (page-count n terminated) reports the number of pages when it changes. */
 +static char export_dir[1024];
 +static int export_width = 0, export_seq = 0;
-+static int export_last_page = -1;
-+static fz_buffer *export_last_png = NULL;
++static int export_first = 0, export_last = 0;
++static uint64_t *export_hash = NULL;     // per page: hash of the last picture
++static int export_hash_len = 0;
++static int export_reported_count = -1, export_reported_done = -1;
 +
-+static void export_page(fz_context *ctx, ui_state *ui, fz_display_list *dl)
++static void export_forget(void)
 +{
-+  if (!export_dir[0] || export_width <= 0 || !dl)
++  for (int i = 0; i < export_hash_len; i++)
++    export_hash[i] = 0;
++}
++
++static uint64_t hash_bytes(const unsigned char *d, size_t n, uint64_t h)
++{
++  for (size_t i = 0; i < n; i++)
++    h = (h ^ d[i]) * 1099511628211ULL;
++  return h;
++}
++
++static void export_one(fz_context *ctx, ui_state *ui, int page, int count, int done)
++{
++  fz_display_list *dl = send(render_page, ui->eng, ctx, page);
++  if (!dl)
 +    return;
 +  fz_pixmap *pix = NULL;
 +  fz_buffer *png = NULL;
@@ -217,57 +256,74 @@ index c202294..1fc5d8e 100644
 +    dev = fz_new_draw_device(ctx, fz_identity, pix);
 +    fz_run_display_list(ctx, dl, dev, ctm, fz_infinite_rect, NULL);
 +    fz_close_device(ctx, dev);
-+    png = fz_new_buffer_from_pixmap_as_png(ctx, pix, fz_default_color_params);
 +
-+    // the same page with the same picture as last time: nothing to report
-+    unsigned char *d1, *d2;
-+    size_t n1 = fz_buffer_storage(ctx, png, &d1), n2 = 0;
-+    if (export_last_png)
-+      n2 = fz_buffer_storage(ctx, export_last_png, &d2);
-+    if (ui->page == export_last_page && export_last_png && n1 == n2 &&
-+        memcmp(d1, d2, n1) == 0)
++    // the same picture as last time: nothing to report (the pixels are
++    // hashed before the slower PNG encoding)
++    uint64_t h = 14695981039346656037ULL;
++    h = hash_bytes(fz_pixmap_samples(ctx, pix),
++                   (size_t)fz_pixmap_stride(ctx, pix) * fz_pixmap_height(ctx, pix), h);
++    if (h == 0)
++      h = 1;
++    if (page >= export_hash_len)
++    {
++      int len = page + 64;
++      export_hash = realloc(export_hash, len * sizeof(uint64_t));
++      if (!export_hash)
++        abort();
++      for (int i = export_hash_len; i < len; i++)
++        export_hash[i] = 0;
++      export_hash_len = len;
++    }
++    if (export_hash[page] == h)
 +      break;
 +
++    png = fz_new_buffer_from_pixmap_as_png(ctx, pix, fz_default_color_params);
++    unsigned char *d;
++    size_t n = fz_buffer_storage(ctx, png, &d);
 +    char path[1200];
-+    snprintf(path, sizeof(path), "%s/page-%d-%d.png", export_dir, ui->page,
-+             export_seq++);
++    snprintf(path, sizeof(path), "%s/page-%d-%d.png", export_dir, page, export_seq++);
 +    FILE *f = fopen(path, "wb");
 +    if (!f)
 +      fz_throw(ctx, FZ_ERROR_GENERIC, "cannot write %s", path);
-+    fwrite(d1, 1, n1, f);
++    fwrite(d, 1, n, f);
 +    fclose(f);
-+
-+    if (export_last_png)
-+      fz_drop_buffer(ctx, export_last_png);
-+    export_last_png = fz_keep_buffer(ctx, png);
-+    export_last_page = ui->page;
-+
-+    int terminated = send(get_status, ui->eng) == DOC_TERMINATED;
-+    printf("(page-image %d %d %d \"%s\")\n", ui->page,
-+           send(page_count, ui->eng), terminated, path);
-+    fflush(stdout);
++    export_hash[page] = h;
++    printf("(page-image %d %d %d \"%s\")\n", page, count, done, path);
 +  }
 +  fz_always(ctx)
 +  {
 +    fz_drop_device(ctx, dev);
 +    fz_drop_pixmap(ctx, pix);
 +    fz_drop_buffer(ctx, png);
++    fz_drop_display_list(ctx, dl);
 +  }
 +  fz_catch(ctx)
 +  {
-+    fprintf(stderr, "[export-png] %s\n", fz_caught_message(ctx));
++    fprintf(stderr, "[export-png] page %d: %s\n", page, fz_caught_message(ctx));
 +  }
++}
++
++static void export_pages(fz_context *ctx, ui_state *ui)
++{
++  if (!export_dir[0] || export_width <= 0)
++    return;
++  int count = send(page_count, ui->eng);
++  int done = send(get_status, ui->eng) == DOC_TERMINATED;
++  if (count != export_reported_count || done != export_reported_done)
++  {
++    printf("(page-count %d %d)\n", count, done);
++    export_reported_count = count;
++    export_reported_done = done;
++  }
++  for (int page = export_first; page <= export_last && page < count; page++)
++    export_one(ctx, ui, page, count, done);
++  fflush(stdout);
 +}
 +
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-   txp_renderer_set_contents(ps->ctx, ui->doc_renderer, dl);
-+  export_page(ps->ctx, ui, dl);
-   fz_drop_display_list(ps->ctx, dl);
-   schedule_event(RENDER_EVENT);
- }
-@@ -1134,6 +1210,20 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1250,30 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -275,7 +331,8 @@ index c202294..1fc5d8e 100644
 +    case EDIT_EXPORT_PNG:
 +      snprintf(export_dir, sizeof(export_dir), "%s", cmd.export_png.dir);
 +      export_width = cmd.export_png.width;
-+      export_last_page = -1;
++      export_forget();
++      export_reported_count = -1;
 +      fprintf(stderr, "[command] export-png %s %d\n", export_dir, export_width);
 +      schedule_event(RELOAD_EVENT);
 +      break;
@@ -283,11 +340,39 @@ index c202294..1fc5d8e 100644
 +    case EDIT_GOTO_PAGE:
 +      synctex_set_target(send(synctex, ui->eng, NULL), 0, NULL, 0);
 +      ui->page = cmd.goto_page.page < 0 ? 0 : cmd.goto_page.page;
++      export_first = export_last = ui->page;
++      schedule_event(RELOAD_EVENT);
++      break;
++
++    case EDIT_EXPORT_RANGE:
++      synctex_set_target(send(synctex, ui->eng, NULL), 0, NULL, 0);
++      export_first = cmd.export_range.first < 0 ? 0 : cmd.export_range.first;
++      export_last = cmd.export_range.last < export_first ? export_first : cmd.export_range.last;
++      ui->page = export_last;          // the engine runs up to this page
 +      schedule_event(RELOAD_EVENT);
 +      break;
    }
  }
  
+@@ -1353,6 +1493,10 @@ bool texpresso_main(struct persistent_state *ps)
+ 
+       if (ui->page >= before_page_count && ui->page < after_page_count)
+         schedule_event(RELOAD_EVENT);
++      // a visible page (PNG export) was finished
++      else if (export_dir[0] && after_page_count > before_page_count &&
++               export_last >= before_page_count && export_first < after_page_count)
++        schedule_event(RELOAD_EVENT);
+ 
+       // Fire an on-demand rerun as soon as the engine is ready, regardless of
+       // idle state. Runs in the main body of the loop (not inside the idle
+@@ -1680,6 +1824,7 @@ bool texpresso_main(struct persistent_state *ps)
+           }
+           if (ui->page < page_count)
+             display_page(ps, ui);
++          export_pages(ps->ctx, ui);
+           break;
+ 
+         case STDIN_EVENT:
 -- 
 2.43.0
 
