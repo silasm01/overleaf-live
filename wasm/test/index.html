@@ -1,0 +1,8 @@
+<!doctype html><meta charset=utf-8><title>texpresso-xetex wasm test</title>
+<pre id=out>running...</pre>
+<script>
+const w = new Worker('worker.js');
+w.onmessage = e => { window.result = e.data; document.getElementById('out').textContent = JSON.stringify({...e.data, xdv: e.data.xdv && e.data.xdv.length}, null, 1); };
+w.onerror = e => { window.result = { error: e.message }; };
+w.postMessage('go');
+</script>

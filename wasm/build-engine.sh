@@ -1,0 +1,28 @@
+#!/bin/bash
+# Builds texpresso-xetex for WASM. Usage: engine.sh [node|web]
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+export PATH=/opt/wasm/emscripten:$PATH
+P=/opt/wasm/sysroot; T=${TP:-/home/claude/tp}/src; O=/opt/wasm/build/engine/obj
+export PKG_CONFIG_PATH=$P/lib/pkgconfig PKG_CONFIG_LIBDIR=$P/lib/pkgconfig
+PKG="freetype2 harfbuzz harfbuzz-icu graphite2 fontconfig libpng icu-uc zlib"
+CF="-O2 -g0 -I$T/engine/include -I$T/engine/layout -I$T/engine/dpx -I$T/include $(pkg-config --cflags $PKG | sed s/-pthread//) ${EXTRA_CFLAGS:-}"
+mkdir -p $O
+srcs=$(cd $T && ls engine/engine/*.c engine/engine/*.cpp engine/dpx/*.c engine/main/*.c common/*.c engine/layout/*.cpp 2>/dev/null | grep -v _Mac)
+compile() { local s=$1; local o=$O/${s//\//_}.o
+  [ "$o" -nt "$T/$s" ] && return 0
+  case $s in *.cpp) em++ -std=c++17 $CF -c -o $o $T/$s;; *) emcc $CF -c -o $o $T/$s;; esac }
+export -f compile; export O T CF PATH
+printf "%s\n" $srcs | xargs -P 2 -I{} bash -c "compile {}" ; echo compiled
+# link
+MODE=${1:-node}
+LIBS="$(pkg-config --libs --static $PKG | sed s/-pthread//g)"
+OUT=/opt/wasm/build/engine/texpresso-xetex.js
+case $MODE in
+  web) OUT=/opt/wasm/web/texpresso-xetex.js; LF="-sENVIRONMENT=worker -sMODULARIZE=1 -sEXPORT_NAME=createEngine -sINVOKE_RUN=0 -sEXIT_RUNTIME=1 -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,ENV,callMain";;
+  nodemem) OUT=/opt/wasm/build/engine/nodemem/texpresso-xetex.js; mkdir -p $(dirname $OUT); LF="-sENVIRONMENT=node -sMODULARIZE=1 -sEXPORT_NAME=createEngine -sINVOKE_RUN=0 -sEXIT_RUNTIME=1 -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,ENV,callMain";;
+  node) LF="--pre-js $HERE/pre-node.js -sNODERAWFS=1 -sENVIRONMENT=node -sEXIT_RUNTIME=1";;
+esac
+em++ -O2 $O/*.o -o $OUT $LIBS -lexpat \
+  -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=8MB -sINITIAL_MEMORY=64MB $LF ${EXTRA_LDFLAGS:-}
+ls -la ${OUT%.js}.*

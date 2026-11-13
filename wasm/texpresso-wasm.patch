@@ -1,0 +1,94 @@
+diff --git a/src/common/texlive_provider.c b/src/common/texlive_provider.c
+index 24d4d29..cae074c 100644
+--- a/src/common/texlive_provider.c
++++ b/src/common/texlive_provider.c
+@@ -442,7 +442,15 @@ static bool list_texlive_files(void)
+   ssize_t len;
+   int ret = 0;
+ 
++#ifdef __EMSCRIPTEN__
++  // WASM: no processes. TEXPRESSO_LSR lists the ls-R files, one per line
++  // (the host writes the output of `kpsewhich --all -engine=xetex ls-R`).
++  const char *lsr = getenv("TEXPRESSO_LSR");
++  FILE *p = lsr ? fopen(lsr, "r") : NULL;
++#define pclose(f) (fclose(f), 0)
++#else
+   FILE *p = popen("kpsewhich --all -engine=xetex ls-R", "r");
++#endif
+   if (!p)
+   {
+     perror("popen");
+diff --git a/src/common/utils.c b/src/common/utils.c
+index cfcbb15..336c933 100644
+--- a/src/common/utils.c
++++ b/src/common/utils.c
+@@ -1,7 +1,9 @@
+ #include "common.h"
+ #include <dirent.h>
+ #include <errno.h>
++#ifndef __EMSCRIPTEN__
+ #include <execinfo.h>
++#endif
+ #include <stdarg.h>
+ #include <stdbool.h>
+ #include <string.h>
+@@ -10,6 +12,8 @@
+ 
+ #ifdef __APPLE__
+ # include <sys/syslimits.h>
++#elif defined(__EMSCRIPTEN__)
++# include <limits.h>
+ #else
+ # include <linux/limits.h>
+ #endif
+@@ -25,6 +29,10 @@ int logging = 0;
+  */
+ void print_backtrace(void)
+ {
++#ifdef __EMSCRIPTEN__
++  fprintf(stderr, "(no backtrace in WASM)\n");
++  return;
++#else
+     int nptrs;
+     void *buffer[BT_BUF_SIZE];
+     char **strings;
+@@ -46,6 +54,7 @@ void print_backtrace(void)
+         fprintf(stderr, "%s\n", strings[j]);
+ 
+     free(strings);
++#endif
+ }
+ 
+ /**
+diff --git a/src/engine/main/main.c b/src/engine/main/main.c
+index 333408e..a69a62e 100644
+--- a/src/engine/main/main.c
++++ b/src/engine/main/main.c
+@@ -1,5 +1,7 @@
+ #ifdef __APPLE__
+ # include <sys/syslimits.h>
++#elif defined(__EMSCRIPTEN__)
++# include <limits.h>
+ #else
+ # include <linux/limits.h>
+ #endif
+@@ -456,7 +458,7 @@ size_t ttstub_input_seek(ttbc_input_handle_t *handle,
+   {
+     txp_input *input = input_as_txp(handle);
+     if (input->id == -1)
+-      return fseek(input->file, offset, whence);
++      return fseek(input->file, offset, whence) == 0 ? ftell(input->file) : (size_t)-1;
+ 
+     int ofs = offset;
+     if (whence == SEEK_CUR)
+@@ -478,7 +480,9 @@ size_t ttstub_input_seek(ttbc_input_handle_t *handle,
+ 
+     return input->file_pos + input->buf_pos;
+   }
+-  return fseek(input_as_file(handle), offset, whence);
++  // Tectonic semantics: return the new position (fseek returns 0)
++  FILE *f = input_as_file(handle);
++  return fseek(f, offset, whence) == 0 ? ftell(f) : (size_t)-1;
+ }
+ 
+ static ssize_t internal_input_read(ttbc_input_handle_t *handle, char *data, size_t len)

@@ -1,0 +1,12 @@
+import { chromium } from '/opt/npm-tools/node_modules/playwright/index.mjs';
+import fs from 'fs';
+const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox', ...(process.env.JSFLAGS ? ['--js-flags=' + process.env.JSFLAGS] : [])] });
+const page = await browser.newPage();
+page.on('console', m => console.log('console:', m.text()));
+await page.goto('http://localhost:8765/index.html');
+await page.waitForFunction(() => window.result, null, { timeout: 600000 });
+const r = await page.evaluate(() => ({ ...window.result, xdv: window.result.xdv ? Array.from(window.result.xdv) : null }));
+if (r.xdv) fs.writeFileSync('/tmp/chrome.xdv', Buffer.from(r.xdv));
+console.log(JSON.stringify({ ...r, xdv: r.xdv && r.xdv.length }, null, 1));
+console.log('chrome', browser.version());
+await browser.close();
