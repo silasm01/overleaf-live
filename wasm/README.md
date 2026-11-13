@@ -1,4 +1,4 @@
-# TeXpresso in WASM (phase 1)
+# TeXpresso in WASM (phases 1 and 2)
 
 This folder builds the TeXpresso engine (`texpresso-xetex`) for WebAssembly.
 Phase 1 shows that the engine runs in a Chrome Web Worker and gives the same
@@ -54,3 +54,50 @@ latex-templates `main.tex`, 22 pages, XeLaTeX, no shell escape:
 - Files in `TEXINPUTS` folders (`template//`) are not found in standalone
   mode. The test links them into the project folder. In TeXpresso mode the
   driver finds them (`-I`).
+
+## Phase 2: live preview with snapshots (14 Nov 2026)
+
+The TeXpresso driver (`src/frontend`, `src/dvi`, MuPDF 1.23.10) and the engine
+run as two WASM modules in one worker. `js/kernel.js` connects them.
+
+- `build-driver.sh`: builds the driver (`texpresso.js` / `.wasm`, 4.7 MB with
+  MuPDF). It needs MuPDF built with `make OS=wasm ... libs` and the SDL2
+  sources for the Emscripten port (`EMCC_LOCAL_PORTS=sdl2=<SDL release-2.32.8>`).
+  SDL is only compiled in; the WASM build does not use it.
+- `build-engine.sh kernel`: the engine with Asyncify (4.4 MB).
+- `js/lib-engine.js`, `js/lib-driver.js`: the host functions of the two modules.
+- `js/kernel.js`: in place of processes and sockets.
+  - The driver is the main program. When it reads an engine channel and no
+    data is there, the kernel runs the engine until the engine sends a query.
+  - The engine is a coroutine (Asyncify). `fork` takes a snapshot of the
+    engine memory; the child continues. If the driver rolls back, the kernel
+    restores the parent's snapshot and `host_fork` returns the child's id.
+  - Snapshots are lists of 64 KiB pages in a page store (a second WASM
+    memory). `js/pagestore.wat` compares and copies pages with SIMD
+    (multi-memory). Snapshots share unchanged pages.
+- The driver's API (end of `src/frontend/main.c`): `txp_wasm_init`,
+  `txp_wasm_input` (the same commands as on stdin), `txp_wasm_tick`,
+  `txp_wasm_idle`. The output is the same as on stdout (`page-image`, ...).
+- Snapshot policy: the driver asks for a fork after `TXP_SNAP_MS` (250) ms of
+  engine time, not after 500 TeX tokens as natively: a WASM snapshot is not free.
+- Reruns for `.aux` are off, as natively.
+
+### Results (Chrome 153 headless worker, 2-core VM; latex-templates main.tex, export of pages 1-3)
+
+| Step | Native TeXpresso | WASM in Chrome |
+|---|---|---|
+| Start to first page | 2.06-2.37 s | 2.37-2.50 s |
+| Edit 1 (page 3) | 0.12-0.15 s | 0.33 s |
+| Edit 2 (page 3) | 0.10-0.12 s | 0.13 s |
+
+- Pages after the two edits: identical to native TeXpresso (`test/native-timed.py`).
+- 9 forks, 2 restores; snapshots 0.5 s in total; engine memory 349 MiB.
+- Tests: `test/worker-live.js` + `test/live.html` + `test/run-chrome-live.mjs`
+  (Chrome), `test/node-live.cjs` (Node, NODERAWFS builds).
+
+### Still to do
+- One file system for both modules in the browser (now each module gets a copy of the files).
+- Pixels to the viewer in place of PNG files.
+- `ASYNCIFY_ONLY` (smaller and faster engine), a faster restore.
+- If the engine aborts, make a new engine instance.
+- Send command text without `\uXXXX` escapes (as the helper's `sexp_string`); TeXpresso does not read them.

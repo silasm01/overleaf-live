@@ -1,0 +1,7 @@
+<!doctype html><meta charset=utf-8><title>TeXpresso WASM live test</title><pre id=out>running...</pre>
+<script>
+const w = new Worker('worker-live.js');
+w.onmessage = e => { window.result = e.data; document.getElementById('out').textContent = JSON.stringify({ ...e.data, images: Object.keys(e.data.images) }, null, 1); };
+w.onerror = e => { window.result = { error: e.message }; };
+w.postMessage({ edits: [["catalog/guide.tex", "Worked examples are", "Worked examples (EDITED NOW) are"], ["catalog/guide.tex", "holds only what", "holds only and exactly what"]] });
+</script>

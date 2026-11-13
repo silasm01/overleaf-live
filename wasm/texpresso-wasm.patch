@@ -60,8 +60,96 @@ index cfcbb15..336c933 100644
  }
  
  /**
+diff --git a/src/dvi/dvi_resmanager.c b/src/dvi/dvi_resmanager.c
+index df97614..9035034 100644
+--- a/src/dvi/dvi_resmanager.c
++++ b/src/dvi/dvi_resmanager.c
+@@ -116,7 +116,17 @@ static const char *kpse_find_picture(const char *name)
+   for (int i = 0; i < count; i++)
+     if (strcmp(names[i], name) == 0)
+       return found[i][0] ? found[i] : NULL;
+-  char cmd[512], result[1024] = "";
++  char result[1024] = "";
++#ifdef __EMSCRIPTEN__
++  {
++    // WASM: the TeX Live file table of the provider (ls-R) answers
++    extern const char *texlive_file_path(const char *name, FILE *record_dependency);
++    const char *tl = texlive_file_path(name, NULL);
++    if (tl)
++      snprintf(result, sizeof(result), "%s", tl);
++  }
++#else
++  char cmd[512];
+   snprintf(cmd, sizeof(cmd), "kpsewhich '%s' 2>/dev/null", name);
+   FILE *f = popen(cmd, "r");
+   if (f)
+@@ -125,6 +135,7 @@ static const char *kpse_find_picture(const char *name)
+       result[0] = '\0';
+     pclose(f);
+   }
++#endif
+   result[strcspn(result, "\r\n")] = '\0';
+   if (count >= N)
+     return NULL;
+diff --git a/src/engine/main/fork.c b/src/engine/main/fork.c
+index d5b5013..e85632d 100644
+--- a/src/engine/main/fork.c
++++ b/src/engine/main/fork.c
+@@ -1,3 +1,47 @@
++#ifdef __EMSCRIPTEN__
++// WASM: no processes. host_fork (wasm/kernel.js) takes a snapshot of the
++// engine's memory and its call stack (Asyncify). It returns 0 in the child,
++// which continues at once on a new channel. The parent continues only when
++// the driver rolls back to it: the kernel restores the snapshot, and
++// host_fork returns the child's id. The kernel also sends the CHLD message
++// for the parent, as send_child_fd does below.
++#include <stdint.h>
++#include <sys/types.h>
++extern int host_fork(uint32_t time);
++extern int host_chan_read(void *data, int len);
++extern void host_chan_wait(void);
++#include <stdio.h>
++#include <stdlib.h>
++
++static void read4(char answer[4])
++{
++  int got = 0;
++  while (got < 4)
++  {
++    int n = host_chan_read(answer + got, 4 - got);
++    if (n < 0) { fprintf(stderr, "texpresso_fork_with_channel: channel closed\n"); abort(); }
++    if (n == 0) { host_chan_wait(); continue; }
++    got += n;
++  }
++}
++
++pid_t texpresso_fork_with_channel(int fd, uint32_t time)
++{
++  (void)fd;
++  int child = host_fork(time);
++  if (child == 0)
++    return 0;
++  char answer[4];
++  do read4(answer);
++  while (answer[0] == 'F' && answer[1] == 'L' && answer[2] == 'S' && answer[3] == 'H');
++  if (!(answer[0] == 'D' && answer[1] == 'O' && answer[2] == 'N' && answer[3] == 'E'))
++  {
++    fprintf(stderr, "texpresso_fork_with_channel: unexpected answer %.4s\n", answer);
++    abort();
++  }
++  return child;
++}
++#else
+ #include <errno.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+@@ -112,3 +156,4 @@ pid_t texpresso_fork_with_channel(int fd, uint32_t time)
+ 
+   return child;
+ }
++#endif
 diff --git a/src/engine/main/main.c b/src/engine/main/main.c
-index 333408e..a69a62e 100644
+index 333408e..0bac93e 100644
 --- a/src/engine/main/main.c
 +++ b/src/engine/main/main.c
 @@ -1,5 +1,7 @@
@@ -92,3 +180,442 @@ index 333408e..a69a62e 100644
  }
  
  static ssize_t internal_input_read(ttbc_input_handle_t *handle, char *data, size_t len)
+@@ -1045,6 +1049,10 @@ int main(int argc, char **argv)
+   // Initialize TeXpresso if necessary
+   if (use_texpresso)
+   {
++#ifdef __EMSCRIPTEN__
++    // WASM: the channel is in the kernel; the FILE is not used
++    texpresso = txp_connect(stdout);
++#else
+     const char *texpresso_fd = getenv("TEXPRESSO_FD");
+     int fd = 0;
+     if (texpresso_fd)
+@@ -1056,6 +1064,7 @@ int main(int argc, char **argv)
+       return 1;
+     }
+     texpresso = txp_connect(fdopen(fd, "r+"));
++#endif
+     if (!texpresso)
+     {
+       fprintf(stderr, "Failed to connect to TeXpresso.\n");
+diff --git a/src/engine/main/texpresso_protocol.c b/src/engine/main/texpresso_protocol.c
+index 3096732..3d14cd4 100644
+--- a/src/engine/main/texpresso_protocol.c
++++ b/src/engine/main/texpresso_protocol.c
+@@ -44,6 +44,44 @@ static void ppanic(const char *txt)
+     exit(1);
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// WASM: the channel to the driver is in the JavaScript kernel (wasm/kernel.js).
++// host_chan_read never blocks: it returns 0 when no data is ready, -1 at the
++// end of the channel. host_chan_wait suspends the engine (Asyncify) until
++// the driver has written more data.
++extern void host_chan_write(const void *data, int len);
++extern int host_chan_read(void *data, int len);
++extern void host_chan_wait(void);
++
++static void write_or_panic(FILE *file, const void *data, int len)
++{
++  (void)file;
++  host_chan_write(data, len);
++}
++
++static void read_exact(FILE *file, void *data, int len)
++{
++  (void)file;
++  char *p = data;
++  while (len > 0)
++  {
++    int n = host_chan_read(p, len);
++    if (n < 0)
++      ppanic("Cannot read from server");
++    if (n == 0)
++    {
++      host_chan_wait();
++      continue;
++    }
++    p += n;
++    len -= n;
++  }
++}
++
++// The kernel delivers each write at once: there is nothing to flush.
++#define fflush(file) ((void)(file), 0)
++#define fileno(file) ((void)(file), 3)
++#else
+ static void write_or_panic(FILE *file, const void *data, int len)
+ {
+   if (fwrite(data, 1, len, file) != len)
+@@ -55,6 +93,7 @@ static void read_exact(FILE *file, void *data, int len)
+   if (fread(data, 1, len, file) != len)
+     ppanic("Cannot read from server");
+ }
++#endif
+ 
+ txp_client *txp_connect(FILE *file)
+ {
+diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
+index 5d275b2..1be1984 100644
+--- a/src/frontend/engine_tex.c
++++ b/src/frontend/engine_tex.c
+@@ -137,6 +137,19 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q);
+ 
+ // Launching processes
+ 
++#ifdef __EMSCRIPTEN__
++// WASM: the engine is a WASM module in the same worker. The kernel
++// (wasm/js/kernel.js) starts it, and gives the driver's end of its channel.
++extern int host_spawn(const char *argv0, const char *argv1, const char *argv2,
++                      const char *argv3, int *fd);
++extern void host_kill(int pid);
++extern void host_close(int fd);
++
++static pid_t exec_xelatex_generic(char **args, int *fd)
++{
++  return host_spawn(args[0], args[1], args[2], args[3], fd);
++}
++#else
+ static pid_t exec_xelatex_generic(char **args, int *fd)
+ {
+   int sockets[2];
+@@ -186,6 +199,7 @@ static pid_t exec_xelatex_generic(char **args, int *fd)
+   *fd = sockets[0];
+   return pid;
+ }
++#endif
+ 
+ static pid_t exec_xelatex(char *engine_path, bool use_texlive, const char *filename, int *fd)
+ {
+@@ -223,8 +237,13 @@ static void close_process(process_t *p)
+ {
+   if (p->fd != -1)
+   {
++#ifdef __EMSCRIPTEN__
++    host_kill(p->pid);
++    host_close(p->fd);
++#else
+     kill(p->pid, SIGTERM);
+     close(p->fd);
++#endif
+     p->fd = -1;
+   }
+ }
+@@ -587,6 +606,21 @@ static bool need_snapshot(fz_context *ctx, struct tex_engine *self, int time)
+     last_time = 0;
+   }
+ 
++#ifdef __EMSCRIPTEN__
++  // WASM: a snapshot copies memory pages (wasm/js/kernel.js), so take one
++  // only after TXP_SNAP_MS (default 250) ms of engine time.
++  {
++    extern double host_proc_age_ms(void);
++    static int snap_ms = -1;
++    if (snap_ms < 0)
++    {
++      const char *e = getenv("TXP_SNAP_MS");
++      snap_ms = e ? atoi(e) : 250;
++    }
++    (void)last_time;
++    return host_proc_age_ms() >= snap_ms;
++  }
++#endif
+   return time > 500 + last_time;
+ }
+ 
+diff --git a/src/frontend/main.c b/src/frontend/main.c
+index ae65882..5189755 100644
+--- a/src/frontend/main.c
++++ b/src/frontend/main.c
+@@ -1905,3 +1905,187 @@ bool texpresso_main(struct persistent_state *ps)
+ 
+   return reload;
+ }
++
++
++#ifdef __EMSCRIPTEN__
++/* ------------------------------------------------------------------------
++   WASM: no SDL window and no main loop. The host (wasm/js/driver.js) calls
++   these functions. Commands are the same as on stdin (sexp protocol), and
++   the output is the same as on stdout (page-image, synctex-target, ...).
++   ------------------------------------------------------------------------ */
++#include <emscripten.h>
++
++static struct persistent_state wasm_ps;
++static ui_state wasm_ui;
++static vstack *wasm_cmd_stack;
++static prot_parser wasm_cmd_parser;
++static unsigned wasm_events;
++static int wasm_rerun_count;
++
++static void wasm_schedule_event(enum custom_events ev) { wasm_events |= 1u << ev; }
++static bool wasm_no_reload(void) { return false; }
++
++// doc_name: the main .tex file, in the current directory.
++// inclusion_path: folders for -I, each ended by a NUL, then one more NUL.
++EMSCRIPTEN_KEEPALIVE
++int txp_wasm_init(const char *doc_name, const char *inclusion_path)
++{
++  struct persistent_state *ps = &wasm_ps;
++  ui_state *ui = &wasm_ui;
++  memset(ps, 0, sizeof(*ps));
++  memset(ui, 0, sizeof(*ui));
++  ps->protocol = EDITOR_SEXP;
++  ps->schedule_event = wasm_schedule_event;
++  ps->should_reload_binary = wasm_no_reload;
++  ps->ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
++  fz_register_document_handlers(ps->ctx);
++  ps->exe_path = "/texpresso";
++  ps->doc_path = ".";
++  ps->doc_name = doc_name;
++  ps->inclusion_path = inclusion_path;
++  ps->use_texlive = 1;
++  ps->rerun_enabled = 0;   // as natively (driver.c)
++  pstate = ps;
++  editor_set_protocol(ps->protocol);
++  editor_set_line_output(0);
++
++  if (!texlive_available())
++  {
++    fprintf(stderr, "[fatal] no TeX Live file list (TEXPRESSO_LSR)\n");
++    return 0;
++  }
++  dvi_reshooks hooks = dvi_texlive_hooks(ps->ctx, ps->doc_path);
++  ui->eng = txp_create_tex_engine(ps->ctx, "texpresso-xetex", 1, 0,
++                                  ps->inclusion_path, ps->doc_name, hooks);
++  ui->doc_renderer = txp_renderer_new(ps->ctx, NULL);
++  ui->page = 0;
++  ui->need_synctex = 1;
++  wasm_cmd_stack = vstack_new(ps->ctx);
++  prot_initialize(&wasm_cmd_parser, 0);
++  send(step, ui->eng, ps->ctx, true);
++  wasm_schedule_event(RELOAD_EVENT);
++  return 1;
++}
++
++// Commands, as on stdin.
++EMSCRIPTEN_KEEPALIVE
++void txp_wasm_input(const char *buffer, int n)
++{
++  struct persistent_state *ps = &wasm_ps;
++  ui_state *ui = &wasm_ui;
++  send(begin_changes, ui->eng, ps->ctx);
++  const char *ptr = buffer, *lim = buffer + n;
++  fz_try(ps->ctx)
++  {
++    while ((ptr = prot_parse(ps->ctx, &wasm_cmd_parser, wasm_cmd_stack, ptr, lim)))
++    {
++      val cmds = vstack_get_values(ps->ctx, wasm_cmd_stack);
++      int n_cmds = val_array_length(ps->ctx, wasm_cmd_stack, cmds);
++      for (int i = 0; i < n_cmds; i++)
++        interpret_command(ps, ui, wasm_cmd_stack, val_array_get(ps->ctx, wasm_cmd_stack, cmds, i));
++    }
++  }
++  fz_catch(ps->ctx)
++  {
++    fprintf(stderr, "error while reading commands: %s\n", fz_caught_message(ps->ctx));
++    vstack_reset(ps->ctx, wasm_cmd_stack);
++    prot_reinitialize(&wasm_cmd_parser);
++  }
++  if (send(end_changes, ui->eng, ps->ctx))
++  {
++    send(step, ui->eng, ps->ctx, true);
++    wasm_schedule_event(RELOAD_EVENT);
++    wasm_rerun_count = 0;
++  }
++}
++
++static void wasm_events_run(void)
++{
++  struct persistent_state *ps = &wasm_ps;
++  ui_state *ui = &wasm_ui;
++  while (wasm_events)
++  {
++    unsigned ev = wasm_events;
++    wasm_events = 0;
++    if (ev & (1u << SCAN_EVENT) || ev & (1u << RENDER_EVENT))
++    {
++      send(begin_changes, ui->eng, ps->ctx);
++      flush_changes(ps, ui);
++      if (ev & (1u << SCAN_EVENT))
++        send(detect_changes, ui->eng, ps->ctx);
++      if (send(end_changes, ui->eng, ps->ctx))
++      {
++        send(step, ui->eng, ps->ctx, true);
++        wasm_events |= 1u << RELOAD_EVENT;
++      }
++    }
++    if (ev & (1u << RELOAD_EVENT))
++      export_pages(ps->ctx, ui);
++  }
++}
++
++// One step of work (approx. 5 ms of engine time). Returns 1 when more work
++// is waiting (call again soon), 0 when the engine is idle.
++EMSCRIPTEN_KEEPALIVE
++int txp_wasm_tick(void)
++{
++  struct persistent_state *ps = &wasm_ps;
++  ui_state *ui = &wasm_ui;
++  int before = send(page_count, ui->eng);
++  bool advance = advance_engine(ps->ctx, ui);
++  send(finish_convergence, ui->eng, ps->ctx);
++  int after = send(page_count, ui->eng);
++  if (ui->page >= before && ui->page < after)
++    wasm_schedule_event(RELOAD_EVENT);
++  else if (export_dir[0] && after > before && export_last >= before && export_first < after)
++    wasm_schedule_event(RELOAD_EVENT);
++  else if (export_dir[0] && export_reported_done != 1 &&
++           send(get_status, ui->eng) == DOC_TERMINATED)
++    wasm_schedule_event(RELOAD_EVENT);
++
++  fz_buffer *buf;
++  synctex_t *stx = send(synctex, ui->eng, &buf);
++  int page = -1, x = -1, y = -1;
++  if (synctex_find_target(ps->ctx, stx, buf, &page, &x, &y))
++  {
++    int rx = x, ry = y, rh = 0, rd = 0;
++    synctex_refine_target(ps->ctx, stx, buf, page, &rx, &ry, &rh, &rd);
++    float fs = send(scale_factor, ui->eng);
++    printf("(synctex-target %d %.2f %.2f %.2f %.2f)\n",
++           page, fs * rx, fs * ry, fs * rh, fs * rd);
++    fflush(stdout);
++  }
++  wasm_events_run();
++  fflush(stdout);
++  return advance || wasm_events != 0;
++}
++
++EMSCRIPTEN_KEEPALIVE
++void txp_wasm_debug(void)
++{
++  ui_state *ui = &wasm_ui;
++  fprintf(stderr, "[debug] status %d, pages %d, ui page %d, finishing %d, aux dirty %d, need %d\n",
++          (int)send(get_status, ui->eng), send(page_count, ui->eng), ui->page,
++          (int)send(is_finishing, ui->eng), (int)send(aux_dirty, ui->eng),
++          (int)need_advance(wasm_ps.ctx, ui));
++}
++
++// The host calls this after approx. 500 ms without edits: rerun for .aux
++// changes (as the SDL loop does after T_IDLE_MS). Returns 1 if it started a
++// pass.
++EMSCRIPTEN_KEEPALIVE
++int txp_wasm_idle(void)
++{
++  ui_state *ui = &wasm_ui;
++  bool aux_ready = !send(is_finishing, ui->eng) && send(aux_dirty, ui->eng);
++  if (wasm_ps.rerun_enabled && wasm_rerun_count < MAX_RERUNS && aux_ready)
++  {
++    wasm_rerun_count++;
++    fprintf(stderr, "[rerun] idle: finishing pass %d/%d\n", wasm_rerun_count, MAX_RERUNS);
++    send(start_finishing, ui->eng);
++    wasm_schedule_event(RELOAD_EVENT);
++    return 1;
++  }
++  return 0;
++}
++#endif
+diff --git a/src/frontend/myabort.c b/src/frontend/myabort.c
+index b237b37..fc7b9c1 100644
+--- a/src/frontend/myabort.c
++++ b/src/frontend/myabort.c
+@@ -23,7 +23,9 @@
+  */
+ 
+ #include "myabort.h"
++#ifndef __EMSCRIPTEN__
+ #include <execinfo.h>
++#endif
+ #include <stdlib.h>
+ #include <stdio.h>
+ 
+diff --git a/src/frontend/sprotocol.c b/src/frontend/sprotocol.c
+index ba71106..9c17e69 100644
+--- a/src/frontend/sprotocol.c
++++ b/src/frontend/sprotocol.c
+@@ -48,6 +48,27 @@ struct channel_s
+   int buf_size;
+ };
+ 
++#ifdef __EMSCRIPTEN__
++// WASM: host_drv_read runs the engine (in the kernel) until it has written
++// data on this channel. It returns 0 at the end of the channel, and gives the
++// driver's end of a new channel in *passed_fd after a fork (as SCM_RIGHTS).
++extern int host_drv_read(int fd, void *data, int len, int *passed_fd);
++extern int host_drv_write(int fd, const void *data, int len);
++extern int host_drv_pending(int fd, int timeout);
++
++static ssize_t read_(channel_t *t, int fd, void *data, size_t len)
++{
++  int passed = -1;
++  int n = host_drv_read(fd, data, len, &passed);
++  if (passed != -1)
++  {
++    if (t->passed_fd != -1)
++      abort();
++    t->passed_fd = passed;
++  }
++  return n;
++}
++#else
+ static ssize_t read_(channel_t *t, int fd, void *data, size_t len)
+ {
+   char msg_control[CMSG_SPACE(1 * sizeof(int))] = {0,};
+@@ -93,6 +114,7 @@ static ssize_t read_(channel_t *t, int fd, void *data, size_t len)
+ 
+   return recvd;
+ }
++#endif
+ 
+ static int buffered_read_at_least(channel_t *t, int fd, char *buf, int atleast, int size)
+ {
+@@ -130,6 +152,12 @@ static bool read_all(channel_t *t, int fd, char *buf, int size)
+   return 1;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++static void write_all(int fd, const char *buf, int size)
++{
++  host_drv_write(fd, buf, size);
++}
++#else
+ static void write_all(int fd, const char *buf, int size)
+ {
+   while (size > 0)
+@@ -151,6 +179,7 @@ static void write_all(int fd, const char *buf, int size)
+     size -= n;
+   }
+ }
++#endif
+ 
+ static void cflush(channel_t *c, int fd)
+ {
+@@ -431,6 +460,9 @@ bool channel_has_pending_query(channel_t *t, int fd, int timeout)
+ {
+   if (t->input.pos != t->input.len) return 1;
+ 
++#ifdef __EMSCRIPTEN__
++  return host_drv_pending(fd, timeout);
++#endif
+   struct pollfd pfd;
+   int n;
+   while(1)
+diff --git a/src/frontend/state.h b/src/frontend/state.h
+index 4854531..52f05f4 100644
+--- a/src/frontend/state.h
++++ b/src/frontend/state.h
+@@ -29,6 +29,13 @@
+ #include <mupdf/fitz/buffer.h>
+ #include "sprotocol.h"
+ 
++#ifdef __EMSCRIPTEN__
++// musl defines stdout as "(stdout)", which breaks the field name "stdout"
++// below; glibc's definition is "stdout".
++#undef stdout
++#define stdout stdout
++#endif
++
+ #define MAX_FILES 1024
+ 
+ enum accesslevel {

@@ -1,0 +1,13 @@
+import { chromium } from '/opt/npm-tools/node_modules/playwright/index.mjs';
+import fs from 'fs';
+const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+const page = await browser.newPage();
+page.on('console', m => console.log('console:', m.text()));
+await page.goto('http://localhost:8766/live.html');
+await page.waitForFunction(() => window.result, null, { timeout: 900000 });
+const r = await page.evaluate(() => window.result);
+fs.mkdirSync('/tmp/chrome-live', { recursive: true });
+for (const [p, d] of Object.entries(r.images || {})) fs.writeFileSync(`/tmp/chrome-live/page-${p}.png`, Buffer.from(d));
+delete r.images;
+console.log(JSON.stringify(r, null, 1));
+await browser.close();

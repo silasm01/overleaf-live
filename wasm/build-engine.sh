@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds texpresso-xetex for WASM. Usage: engine.sh [node|web]
+# Builds texpresso-xetex for WASM. Usage: build-engine.sh [node|nodemem|web|kernel]
+#   kernel: the engine for the live preview (Asyncify, js/lib-engine.js); ENGINE_ENV=node,worker; ENGINE_FS=-sNODERAWFS=1 for node tests
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH=/opt/wasm/emscripten:$PATH
@@ -20,6 +21,9 @@ LIBS="$(pkg-config --libs --static $PKG | sed s/-pthread//g)"
 OUT=/opt/wasm/build/engine/texpresso-xetex.js
 case $MODE in
   web) OUT=/opt/wasm/web/texpresso-xetex.js; LF="-sENVIRONMENT=worker -sMODULARIZE=1 -sEXPORT_NAME=createEngine -sINVOKE_RUN=0 -sEXIT_RUNTIME=1 -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,ENV,callMain";;
+  kernel) OUT=/opt/wasm/build/engine/kernel/texpresso-xetex.js; mkdir -p $(dirname $OUT)
+    emcc -O2 -c -o $O/engine-keep.o $HERE/js/engine-keep.c
+    LF="--js-library $HERE/js/lib-engine.js -sENVIRONMENT=${ENGINE_ENV:-node,worker} -sMODULARIZE=1 -sEXPORT_NAME=createEngine -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,ENV,HEAPU8,callMain -sEXPORTED_FUNCTIONS=_main,_txp_keep_internals,_sbrk -sASYNCIFY=1 -sASYNCIFY_IMPORTS=host_chan_wait,host_fork -sASYNCIFY_STACK_SIZE=1048576 ${ENGINE_FS:-}";;
   nodemem) OUT=/opt/wasm/build/engine/nodemem/texpresso-xetex.js; mkdir -p $(dirname $OUT); LF="-sENVIRONMENT=node -sMODULARIZE=1 -sEXPORT_NAME=createEngine -sINVOKE_RUN=0 -sEXIT_RUNTIME=1 -sFORCE_FILESYSTEM=1 -sEXPORTED_RUNTIME_METHODS=FS,ENV,callMain";;
   node) LF="--pre-js $HERE/pre-node.js -sNODERAWFS=1 -sENVIRONMENT=node -sEXIT_RUNTIME=1";;
 esac
