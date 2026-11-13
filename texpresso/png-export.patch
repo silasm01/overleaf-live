@@ -1,0 +1,293 @@
+From fc9d23521863d10518acaae6290e866323f0dd3b Mon Sep 17 00:00:00 2001
+From: Silas Mikkelsen <noreply@example.com>
+Date: Fri, 13 Nov 2026 18:27:36 +0100
+Subject: [PATCH] Add export-png and goto-page editor commands; try .tex in -I
+ paths; find TeX Live pictures with kpsewhich
+
+---
+ src/frontend/editor.c     | 29 +++++++++++++
+ src/frontend/editor.h     | 11 +++++
+ src/frontend/engine_tex.c | 71 ++++++++++++++++++++++++++++++
+ src/frontend/main.c       | 90 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 201 insertions(+)
+
+diff --git a/src/frontend/editor.c b/src/frontend/editor.c
+index 6face98..4d556e1 100644
+--- a/src/frontend/editor.c
++++ b/src/frontend/editor.c
+@@ -219,6 +219,35 @@ bool editor_parse(fz_context *ctx,
+             .h = val_number(ctx, val_array_get(ctx, stack, command, 4)),
+         }};
+   }
++  else if (strcmp(verb, "export-png") == 0)
++  {
++    // (export-png "dir" width): render each displayed page to a PNG in dir
++    // and report it with (page-image ...); an empty dir turns it off
++    if (len != 3)
++      goto arity;
++    val dir = val_array_get(ctx, stack, command, 1);
++    val width = val_array_get(ctx, stack, command, 2);
++    if (!val_is_string(dir) || !val_is_number(width))
++      goto arguments;
++    *out = (struct editor_command){
++        .tag = EDIT_EXPORT_PNG,
++        .export_png = {.dir = val_string(ctx, stack, dir),
++                       .width = val_number(ctx, width)},
++    };
++  }
++  else if (strcmp(verb, "goto-page") == 0)
++  {
++    // (goto-page n): show page n (counted from 0)
++    if (len != 2)
++      goto arity;
++    val page = val_array_get(ctx, stack, command, 1);
++    if (!val_is_number(page))
++      goto arguments;
++    *out = (struct editor_command){
++        .tag = EDIT_GOTO_PAGE,
++        .goto_page = {.page = val_number(ctx, page)},
++    };
++  }
+   else if (strcmp(verb, "rescan") == 0)
+   {
+     if (len != 1)
+diff --git a/src/frontend/editor.h b/src/frontend/editor.h
+index 05fdd1c..0137f92 100644
+--- a/src/frontend/editor.h
++++ b/src/frontend/editor.h
+@@ -37,6 +37,8 @@ enum EDITOR_COMMAND
+   EDIT_RESUME,
+   EDIT_RERUN,
+   EDIT_RERUN_ONCE,
++  EDIT_EXPORT_PNG,
++  EDIT_GOTO_PAGE,
+ };
+ 
+ struct editor_change
+@@ -136,6 +138,15 @@ struct editor_command
+ 
+     struct {
+     } rerun_once;
++
++    struct {
++      const char *dir;
++      int width;
++    } export_png;
++
++    struct {
++      int page;
++    } goto_page;
+   };
+ };
+ 
+diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
+index 5866b1b..5d275b2 100644
+--- a/src/frontend/engine_tex.c
++++ b/src/frontend/engine_tex.c
+@@ -27,6 +27,7 @@
+ #include <limits.h>
+ #include <unistd.h>
+ #include <string.h>
++#include <strings.h>
+ #include <fcntl.h>
+ #include <sys/wait.h>
+ #include <sys/stat.h>
+@@ -452,6 +453,56 @@ static fz_buffer *output_data(fileentry_t *e)
+   return e->saved.data;
+ }
+ 
++// Pictures that come with TeX Live (e.g. example-image-a.pdf from mwe):
++// the engine doesn't search the TeX tree for them, so ask kpsewhich.
++// Results are remembered, also when nothing was found.
++static const char *kpse_picture(const char *path, char buf[1024], struct stat *st)
++{
++  static const char *exts[] = {".pdf", ".png", ".jpg", ".jpeg", ".eps", NULL};
++  const char *dot = strrchr(path, '.');
++  if (!dot || strchr(path, '/') || strchr(path, '\'') || strchr(path, '"'))
++    return NULL;
++  int is_picture = 0;
++  for (int i = 0; exts[i]; i++)
++    if (strcasecmp(dot, exts[i]) == 0)
++      is_picture = 1;
++  if (!is_picture)
++    return NULL;
++
++  enum { N = 64 };
++  static char names[N][256], found[N][1024];
++  static int count = 0;
++  for (int i = 0; i < count; i++)
++    if (strcmp(names[i], path) == 0)
++    {
++      if (!found[i][0] || stat(found[i], st) == -1)
++        return NULL;
++      snprintf(buf, 1024, "%s", found[i]);
++      return buf;
++    }
++
++  char cmd[512], result[1024] = "";
++  snprintf(cmd, sizeof(cmd), "kpsewhich '%s' 2>/dev/null", path);
++  FILE *f = popen(cmd, "r");
++  if (f)
++  {
++    if (!fgets(result, sizeof(result), f))
++      result[0] = '\0';
++    pclose(f);
++  }
++  result[strcspn(result, "\r\n")] = '\0';
++  if (count < N && strlen(path) < 256)
++  {
++    snprintf(names[count], 256, "%s", path);
++    snprintf(found[count], 1024, "%s", result);
++    count++;
++  }
++  if (!result[0] || stat(result, st) == -1)
++    return NULL;
++  snprintf(buf, 1024, "%s", result);
++  return buf;
++}
++
+ static const char *
+ lookup_path(struct tex_engine *self, const char *path, char buf[1024], struct stat *st)
+ {
+@@ -468,6 +519,26 @@ lookup_path(struct tex_engine *self, const char *path, char buf[1024], struct st
+   }
+   while ((fs_path = expand_path(&inclusion_path, path, buf)));
+ 
++  // TeX asks for "modules/profile" when the file is "modules/profile.tex":
++  // in the inclusion path, also try the name with .tex
++  if (!fs_path && self->inclusion_path && self->inclusion_path[0])
++  {
++    const char *base = strrchr(path, '/');
++    base = base ? base + 1 : path;
++    char with_tex[1024];
++    if (!strchr(base, '.') && strlen(path) + 5 < sizeof(with_tex))
++    {
++      snprintf(with_tex, sizeof(with_tex), "%s.tex", path);
++      inclusion_path = self->inclusion_path;
++      while ((fs_path = expand_path(&inclusion_path, with_tex, buf)))
++        if (stat(fs_path, st) != -1)
++          break;
++    }
++  }
++
++  if (!fs_path)
++    fs_path = kpse_picture(path, buf, st);
++
+   return fs_path;
+ }
+ 
+diff --git a/src/frontend/main.c b/src/frontend/main.c
+index c202294..1fc5d8e 100644
+--- a/src/frontend/main.c
++++ b/src/frontend/main.c
+@@ -917,10 +917,86 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+   return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
+ }
+ 
++/* PNG export: each page shown is also rendered to a PNG file and
++   reported on stdout, for front-ends that draw the pages themselves:
++     (page-image page page-count terminated "path")
++   The front-end owns the file afterwards (it should delete it). */
++static char export_dir[1024];
++static int export_width = 0, export_seq = 0;
++static int export_last_page = -1;
++static fz_buffer *export_last_png = NULL;
++
++static void export_page(fz_context *ctx, ui_state *ui, fz_display_list *dl)
++{
++  if (!export_dir[0] || export_width <= 0 || !dl)
++    return;
++  fz_pixmap *pix = NULL;
++  fz_buffer *png = NULL;
++  fz_device *dev = NULL;
++  fz_var(pix);
++  fz_var(png);
++  fz_var(dev);
++  fz_try(ctx)
++  {
++    fz_rect bounds = fz_bound_display_list(ctx, dl);
++    float w = bounds.x1 - bounds.x0;
++    if (w <= 0)
++      fz_throw(ctx, FZ_ERROR_GENERIC, "empty page");
++    float scale = (float)export_width / w;
++    fz_matrix ctm = fz_scale(scale, scale);
++    fz_irect bbox = fz_round_rect(fz_transform_rect(bounds, ctm));
++    pix = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), bbox, NULL, 0);
++    fz_clear_pixmap_with_value(ctx, pix, 255);
++    dev = fz_new_draw_device(ctx, fz_identity, pix);
++    fz_run_display_list(ctx, dl, dev, ctm, fz_infinite_rect, NULL);
++    fz_close_device(ctx, dev);
++    png = fz_new_buffer_from_pixmap_as_png(ctx, pix, fz_default_color_params);
++
++    // the same page with the same picture as last time: nothing to report
++    unsigned char *d1, *d2;
++    size_t n1 = fz_buffer_storage(ctx, png, &d1), n2 = 0;
++    if (export_last_png)
++      n2 = fz_buffer_storage(ctx, export_last_png, &d2);
++    if (ui->page == export_last_page && export_last_png && n1 == n2 &&
++        memcmp(d1, d2, n1) == 0)
++      break;
++
++    char path[1200];
++    snprintf(path, sizeof(path), "%s/page-%d-%d.png", export_dir, ui->page,
++             export_seq++);
++    FILE *f = fopen(path, "wb");
++    if (!f)
++      fz_throw(ctx, FZ_ERROR_GENERIC, "cannot write %s", path);
++    fwrite(d1, 1, n1, f);
++    fclose(f);
++
++    if (export_last_png)
++      fz_drop_buffer(ctx, export_last_png);
++    export_last_png = fz_keep_buffer(ctx, png);
++    export_last_page = ui->page;
++
++    int terminated = send(get_status, ui->eng) == DOC_TERMINATED;
++    printf("(page-image %d %d %d \"%s\")\n", ui->page,
++           send(page_count, ui->eng), terminated, path);
++    fflush(stdout);
++  }
++  fz_always(ctx)
++  {
++    fz_drop_device(ctx, dev);
++    fz_drop_pixmap(ctx, pix);
++    fz_drop_buffer(ctx, png);
++  }
++  fz_catch(ctx)
++  {
++    fprintf(stderr, "[export-png] %s\n", fz_caught_message(ctx));
++  }
++}
++
+ static void display_page(struct persistent_state *ps, ui_state *ui)
+ {
+   fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
+   txp_renderer_set_contents(ps->ctx, ui->doc_renderer, dl);
++  export_page(ps->ctx, ui, dl);
+   fz_drop_display_list(ps->ctx, dl);
+   schedule_event(RENDER_EVENT);
+ }
+@@ -1134,6 +1210,20 @@ static void interpret_command(struct persistent_state *ps,
+       fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
+       schedule_event(SCAN_EVENT);
+       break;
++
++    case EDIT_EXPORT_PNG:
++      snprintf(export_dir, sizeof(export_dir), "%s", cmd.export_png.dir);
++      export_width = cmd.export_png.width;
++      export_last_page = -1;
++      fprintf(stderr, "[command] export-png %s %d\n", export_dir, export_width);
++      schedule_event(RELOAD_EVENT);
++      break;
++
++    case EDIT_GOTO_PAGE:
++      synctex_set_target(send(synctex, ui->eng, NULL), 0, NULL, 0);
++      ui->page = cmd.goto_page.page < 0 ? 0 : cmd.goto_page.page;
++      schedule_event(RELOAD_EVENT);
++      break;
+   }
+ }
+ 
+-- 
+2.43.0
+

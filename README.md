@@ -1,0 +1,104 @@
+# Overleaf Live (prototype)
+
+Live preview for Overleaf. TeXpresso on your PC typesets the page while you
+type, and a Chrome extension shows the page over Overleaf's PDF pane.
+
+```
+Overleaf tab (Chrome)                     WSL (Ubuntu)
+  page.js     reads each edit       ┐
+  content.js  "Live" viewer, zip    ├──>  helper  ──>  TeXpresso (XeLaTeX)
+  background.js WebSocket           ┘ <──  PNG of the page you look at
+```
+
+Folders:
+- `extension/`: the Chrome extension
+- `helper/overleaf_live.py`: the helper (runs in WSL)
+- `texpresso/png-export.patch`: adds two commands to TeXpresso (render a page to PNG, go to a page)
+- `install.sh`: installs everything in WSL
+- `update.sh`: gets the newest version from GitHub and installs it
+
+## 1. Install WSL (one time)
+
+1. Open **PowerShell as administrator**. Type:
+   `wsl --install -d Ubuntu-24.04`
+2. Restart Windows when it tells you to.
+3. Ubuntu opens. Type a user name and a password. Keep the password: `install.sh` asks for it.
+
+## 2. Get this repo in WSL (one time)
+
+The repo is private, so WSL must sign in to GitHub. In Ubuntu:
+
+```
+sudo apt install -y gh
+gh auth login          # GitHub.com, HTTPS, "Login with a web browser"
+gh auth setup-git      # git uses this login for pull
+git clone https://github.com/silasm01/overleaf-live ~/overleaf-live-src
+```
+
+## 3. Install (one time)
+
+```
+cd ~/overleaf-live-src && bash install.sh
+```
+
+The script installs the missing Ubuntu packages, TeX Live 2026 (approx. 2–3 GB, 20–40 minutes), TeXpresso, the helper, and the extension in `C:\Users\<you>\overleaf-live-extension`. It also starts the helper. At the end it must show `OK: TeXpresso works`.
+
+Then, in Chrome:
+1. Go to `chrome://extensions` and turn on **Developer mode** (top right).
+2. Remove any older Overleaf Live.
+3. Click **Load unpacked** and select `C:\Users\<you>\overleaf-live-extension`. Do not move this folder: Chrome loads the extension from it, and `update.sh` puts new versions in it.
+
+The extension ID must be `ocdaihokchcbanejcpclejmpaobbafcj`. The helper accepts connections only from this ID.
+
+## 4. Start the helper when Windows starts (one time)
+
+Open **PowerShell** (not as administrator). Type (one command):
+
+```powershell
+Register-ScheduledTask -TaskName "Overleaf Live helper" -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries) -Action (New-ScheduledTaskAction -Execute "powershell.exe" -Argument '-WindowStyle Hidden -Command "wsl.exe -d Ubuntu-24.04 --exec bash -lc ~/overleaf-live/start.sh"')
+```
+
+To remove it later: `Unregister-ScheduledTask -TaskName "Overleaf Live helper"`.
+
+## Update
+
+In Ubuntu:
+
+```
+~/overleaf-live-src/update.sh
+```
+
+It gets the newest version from GitHub, rebuilds TeXpresso only when its patch changed, and restarts the helper. The extension reloads itself the next time it connects to the helper. Then reload the Overleaf tab (the viewer says so).
+
+## Use it
+
+1. Open an Overleaf project. Click **Live** (bottom right of the PDF pane).
+2. The viewer covers Overleaf's PDF pane. Click **Live** again to see Overleaf's PDF.
+3. ◀ ▶ (or Page Up / Page Down) go to another page. TeXpresso typesets only up to the page you look at, so `2 / 3+` means "page 2, at least 3 pages".
+4. **Lua**: for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn on Lua only for projects you trust (yours). The setting is saved for each project.
+5. **Sync** sends all project files again. The extension does this automatically when you open another file. Overleaf allows 10 downloads a minute, so the extension waits at least 10 seconds between syncs.
+
+The project's copy on your PC is in `~/.overleaf-live/<project id>/` in WSL.
+
+## Requirements for a project
+
+- It must compile with XeLaTeX. For your template, this needs the XeLaTeX changes in `setup.tex`, `modules/lib/luabridge.tex`, `modules/lib/luabridge.lua` and `modules/profile.tex` (in the latex-templates repo since 13 November 2026).
+- Folders that `latexmkrc` adds to `TEXINPUTS` (for example `template//` in the latex-templates repo) are found too.
+- The main file is `main.tex`, or else the first `.tex` file at the top that has `\documentclass`.
+
+## Limits of this prototype
+
+- The picture always fits the width of the pane. There is no zoom and no SyncTeX (click to go to the source).
+- The extension uses Overleaf's unsupported hook for extensions (`UNSTABLE_editor:extensions`). An Overleaf update can break it.
+- The extension reads edits only for the open file, but these include edits by collaborators. Changes in other files come with the next Sync.
+- TeXpresso does not run BibTeX. With Lua on, the normal compile makes the `.bbl` file, and TeXpresso uses it.
+
+## If it does not work
+
+| Status in the viewer | What to do |
+|---|---|
+| `helper not running (start it in WSL)` | In Ubuntu: `~/overleaf-live/start.sh &`, then look at `~/overleaf-live/helper.log`. To stop it: `pkill -f overleaf-live/start.sh; pkill -f overleaf_live.py`. |
+| The helper runs, but Chrome cannot connect | Make a file `C:\Users\silas\.wslconfig` with the two lines `[wsl2]` and `networkingMode=mirrored`. Then type `wsl --shutdown` in PowerShell and start Ubuntu again. |
+| `can't find this file in the file tree` | Open the folder of the file in Overleaf's file tree. |
+| `could not get the project files` | Wait 1 minute (Overleaf's limit), then click Sync. |
+| Red errors at the top | These are the LaTeX errors from TeXpresso, with line numbers. |
