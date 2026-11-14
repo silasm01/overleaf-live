@@ -2,6 +2,9 @@
 // worker (worker.js) and connects it to background.js. An offscreen document
 // with the reason WORKERS has no time limit; the service worker has one.
 const worker = new Worker('worker.js');
+// The TeX Live store and the format must stay (one download only): ask Chrome
+// not to delete them when the disk is full (unlimitedStorage gives the quota).
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 let port = null;
 
 function connect() {
