@@ -4,7 +4,8 @@
 // and posts to content.js:
 //   - the text of the open file after every change, including changes
 //     made by collaborators;
-//   - the cursor position (for the caret in the live PDF).
+//   - the cursor position (for the caret in the live PDF);
+//   - the .bbl file of Overleaf's last compile (for biblatex).
 // content.js can ask it to move the cursor (reverse search).
 (() => {
   const TAG = "__overleafLive";
@@ -75,6 +76,36 @@
     schedule();
     scheduleCursor();
   });
+
+  // Overleaf's compile answer lists its output files. Its .bbl (made by Biber
+  // or BibTeX on Overleaf) goes to content.js: the browser engine can't run
+  // Biber, so for biblatex it uses Overleaf's .bbl. The file is fetched here,
+  // in Overleaf's page, as Overleaf fetches its output files.
+  const pageFetch = window.fetch;
+  window.fetch = function (input, init) {
+    const result = pageFetch.apply(this, arguments);
+    try {
+      const url = typeof input === "string" ? input : input && input.url;
+      if (url && /\/project\/[0-9a-f]{24}\/compile(\?|$)/.test(url)) {
+        result.then((res) => res.clone().json()).then(async (data) => {
+          const files = (data && Array.isArray(data.outputFiles)) ? data.outputFiles : [];
+          const file = files.find((f) => /\.bbl$/.test(f.path || ""));
+          if (!file || !file.url) return;
+          const params = new URLSearchParams();
+          if (data.compileGroup) params.set("compileGroup", data.compileGroup);
+          if (data.clsiServerId) params.set("clsiserverid", data.clsiServerId);
+          const query = params.toString() ? (file.url.includes("?") ? "&" : "?") + params : "";
+          for (const u of [(data.pdfDownloadDomain || "") + file.url + query, file.url + query, file.url]) {
+            try {
+              const r = await pageFetch(u, { credentials: "include" });
+              if (r.ok) { post({ kind: "bbl", text: await r.text() }); return; }
+            } catch (e) { /* the next URL */ }
+          }
+        }).catch(() => {});
+      }
+    } catch (e) { /* never break Overleaf's own fetch */ }
+    return result;
+  };
 
   // move the cursor to line/column and show it (reverse search)
   function gotoPosition(line, column) {

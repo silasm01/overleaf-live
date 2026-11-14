@@ -704,6 +704,11 @@
       }
       return;
     }
+    if (msg.kind === "bbl") {
+      // Overleaf's .bbl (Biber): the browser engine uses it for biblatex
+      if (settings.on && connected && typeof msg.text === "string") send({ type: "file", path: "output.bbl", text: msg.text });
+      return;
+    }
     if (msg.kind === "cursor") {
       if (!settings.on || !connected) return;
       const path = pathOf(msg.docId);

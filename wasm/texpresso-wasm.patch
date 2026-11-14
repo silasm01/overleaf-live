@@ -472,7 +472,7 @@ index 3096732..3d14cd4 100644
  txp_client *txp_connect(FILE *file)
  {
 diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
-index 5d275b2..58efd77 100644
+index 5d275b2..7a5f44f 100644
 --- a/src/frontend/engine_tex.c
 +++ b/src/frontend/engine_tex.c
 @@ -137,6 +137,19 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q);
@@ -688,11 +688,63 @@ index 5d275b2..58efd77 100644
    {
      if (self->trace[trace].time <= time && possible_fence(&self->trace[trace]))
      {
+@@ -1680,6 +1845,51 @@ static fileentry_t *engine_find_file(txp_engine *_self, fz_context *ctx, const c
+   return filesystem_lookup_or_create(ctx, self->fs, path);
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// WASM: the files this run wrote that a next run reads back (.aux, .toc,
++// .out, ...), for the second pass that the worker does (as latexmk). Writes
++// them to `file` as records "path\nlength\ndata". Returns their count.
++static bool is_feedback_output(const char *path)
++{
++  static const char *skip[] = {
++    ".log", ".xdv", ".dvi", ".pdf", ".synctex", ".synctex.gz", ".fls", ".blg",
++    ".luareq", ".lualog", ".luakeys", NULL
++  };
++  if (path[0] == '|' || strcmp(path, "stdout") == 0)
++    return false;
++  if (strstr(path, ".luaout"))
++    return false;
++  size_t n = strlen(path);
++  for (int i = 0; skip[i]; i++)
++  {
++    size_t m = strlen(skip[i]);
++    if (n >= m && strcmp(path + n - m, skip[i]) == 0)
++      return false;
++  }
++  return true;
++}
++
++int tex_engine_dump_outputs(txp_engine *_self, fz_context *ctx, const char *file)
++{
++  SELF;
++  FILE *f = fopen(file, "wb");
++  if (!f)
++    return -1;
++  int count = 0;
++  fileentry_t *e;
++  for (int index = 0; (e = filesystem_scan(self->fs, &index));)
++  {
++    if (e->saved.level != FILE_WRITE || !e->saved.data || !is_feedback_output(e->path))
++      continue;
++    fprintf(f, "%s\n%d\n", e->path, (int)e->saved.data->len);
++    fwrite(e->saved.data->data, 1, e->saved.data->len, f);
++    count++;
++  }
++  fclose(f);
++  return count;
++}
++#endif
++
+ txp_engine *txp_create_tex_engine(fz_context *ctx,
+                                   const char *engine_path,
+                                   bool use_texlive,
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index ae65882..5189755 100644
+index ae65882..41b3acb 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -1905,3 +1905,187 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1905,3 +1905,209 @@ bool texpresso_main(struct persistent_state *ps)
  
    return reload;
  }
@@ -849,6 +901,28 @@ index ae65882..5189755 100644
 +  wasm_events_run();
 +  fflush(stdout);
 +  return advance || wasm_events != 0;
++}
++
++// The second pass (worker.js): run the engine to the end of the document,
++// also past the pages in view, and give its outputs (.aux, .toc, ...).
++extern int tex_engine_dump_outputs(txp_engine *eng, fz_context *ctx, const char *file);
++
++EMSCRIPTEN_KEEPALIVE
++void txp_wasm_run_to_end(void)
++{
++  wasm_ui.page = 1 << 29;
++}
++
++EMSCRIPTEN_KEEPALIVE
++int txp_wasm_status(void)
++{
++  return send(get_status, wasm_ui.eng) == DOC_TERMINATED;
++}
++
++EMSCRIPTEN_KEEPALIVE
++int txp_wasm_dump_outputs(const char *file)
++{
++  return tex_engine_dump_outputs(wasm_ui.eng, wasm_ps.ctx, file);
 +}
 +
 +EMSCRIPTEN_KEEPALIVE

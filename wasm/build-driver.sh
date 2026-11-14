@@ -30,7 +30,7 @@ emcc -O2 $O/*.o -o $OUT $MUPDF/build/wasm/release/libmupdf.a $MUPDF/build/wasm/r
   --js-library $HERE/js/lib-driver.js --js-library $HERE/js/lib-tl.js -sUSE_SDL=2 \
   -sENVIRONMENT=${DRIVER_ENV:-node,worker} -sMODULARIZE=1 -sEXPORT_NAME=createDriver -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 \
   -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=4MB -sFORCE_FILESYSTEM=1 \
-  -sEXPORTED_FUNCTIONS=_txp_wasm_init,_txp_wasm_input,_txp_wasm_tick,_txp_wasm_idle,_txp_wasm_debug,_malloc,_free \
+  -sEXPORTED_FUNCTIONS=_txp_wasm_init,_txp_wasm_input,_txp_wasm_tick,_txp_wasm_idle,_txp_wasm_debug,_txp_wasm_run_to_end,_txp_wasm_status,_txp_wasm_dump_outputs,_malloc,_free \
   -sEXPORTED_RUNTIME_METHODS=FS,ENV,HEAPU8,stringToUTF8,lengthBytesUTF8,UTF8ToString,ccall \
   ${DRIVER_FS:-} ${EXTRA_LDFLAGS:-}
 ls -la ${OUT%.js}.*

@@ -205,3 +205,32 @@ Pages 1-3 after the two edits: identical to native TeXpresso.
 - Native build for tests of the sandbox: `gcc -I$LUA -Isrc/frontend main.c
   src/frontend/txp_lua.c $LUA/l*.c` (without lua.c, luac.c, ltests.c), with a
   small main that gives files from the current folder.
+
+## Phase 5b: second pass and BibTeX (14 Nov 2026)
+
+- Second pass (worker.js `secondPass`): 2 s after the last edit or view
+  change (`BACKGROUND_PAUSE`, as the helper's `LUA_IDLE`), the driver runs
+  the engine to the end of the document (`txp_wasm_run_to_end`), past the
+  pages in view. At the end (`txp_wasm_status`), `txp_wasm_dump_outputs`
+  gives the files the run wrote (not .log, .xdv, .synctex, Lua cache files).
+  Changed ones go back as `(open path text)`, as an edit: TeXpresso goes
+  back to where it read them (e.g. `\begin{document}` for the .aux). At
+  most 3 passes per change; Biber's .bcf and .run.xml are not given back.
+  The outputs are kept for the project (`P.feedback`) and written as files
+  when the engine starts again.
+- BibTeX: Tectonic 0.13.1's C BibTeX (`wasm/bibtex/bibtex.c`, MIT) with a
+  stdio layer (`bibtex-io.c`), `build-bibtex.sh` → `bibtex.wasm` (150 KB).
+  When the main .aux has `\bibdata`, the worker runs it (a new instance per
+  run) with the .aux files, the .bib files (project, else TeX Live) and the
+  .bst (`TexLive.findByName`). It runs again only when the citation lines or
+  the .bib/.bst files change. Same .bbl as TeX Live's bibtex (test file).
+- biblatex: page.js wraps `fetch` and reads Overleaf's compile answer
+  (`outputFiles`); it fetches the `.bbl` (Biber's, on Overleaf) and
+  content.js sends it as `{"type": "file", "path": "output.bbl"}`. When the
+  run wrote a `.bcf`, the worker gives that `.bbl` back as `<job>.bbl`.
+  Not tested on the real Overleaf (URL parameters of the output files).
+- Tests: a BibTeX document (contents, `\ref`, 2 citations): correct after 2
+  passes; an edit of the .bib file and of a `\cite` updates the
+  bibliography in approx. 0.4 s. A biblatex document with Biber's .bbl from
+  a local `latexmk`: correct after 2 passes. latex-templates: contents and
+  "Page n / 23" correct after 1 pass.

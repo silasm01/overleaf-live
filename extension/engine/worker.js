@@ -7,7 +7,7 @@
 //   in:  {client, msg} | {client, closed: true} | {reset: true}
 //   out: {to: client | null (all tabs of the project), msg}
 'use strict';
-importScripts('kernel.js', 'texpresso-xetex.js', 'texpresso.js', 'xzdec.js', 'texlive.js');
+importScripts('kernel.js', 'texpresso-xetex.js', 'texpresso.js', 'xzdec.js', 'texlive.js', 'bibtex.js');
 
 const PROJECT = '/project';
 const EXPORT = '/export';
@@ -162,6 +162,9 @@ const P = {
   run: null,                 // {kernel, engine, drv, out, sentErrors, formatSaved}
   starting: null,
   luaNoted: false,
+  feedback: new Map(),       // rel path -> bytes: outputs given back (second pass)
+  overleafBbl: null,         // the .bbl of Overleaf's last compile (for biblatex)
+  lastActivity: 0,           // performance.now() of the last edit or view change
 };
 
 function send(msg, to = null) {
@@ -236,7 +239,7 @@ async function start() {
     // TEXPRESSO_SHELL_ESCAPE=2: restricted shell escape; piped input runs
     // kpsewhich and texlua in the driver's Lua sandbox (live Lua for luabridge)
     const env = { TEXPRESSO_LSR: '/lsr.txt', XDG_CACHE_HOME: '/cache', TEXPRESSO_SHELL_ESCAPE: '2' };
-    const run = { out: '', sentErrors: null, formatSaved: false, failed: false };
+    const run = { out: '', sentErrors: null, formatSaved: false, failed: false, toEnd: false, passes: 0 };
     run.kernel = new Kernel({ log: s => { if (/failed/.test(s)) { run.failed = true; log(s); } } });
     run.engine = await createEngine({ kernel: run.kernel, tl, preRun: [m => Object.assign(m.ENV, env)],
       print: () => {}, printErr: () => {} });
@@ -247,6 +250,8 @@ async function start() {
     for (const mod of [run.engine, run.drv]) {
       mod.FS.writeFile('/lsr.txt', tl.setup(mod.FS));
       mod.FS.mkdirTree(PROJECT);
+      // outputs of the last run (.aux, .toc, ...: the second pass), then the project
+      for (const [rel, data] of P.feedback) if (!P.files.has(rel)) put(mod.FS, `${PROJECT}/${rel}`, data, Date.now());
       for (const [rel, data] of P.files) put(mod.FS, `${PROJECT}/${rel}`, data, Date.now());
       mod.FS.chdir(PROJECT);
     }
@@ -266,10 +271,6 @@ async function start() {
     command(`(export-range ${P.first} ${P.last})`);
     command('(rescan)');
     status('typesetting', true);
-    if (P.lua && !P.luaNoted) {
-      P.luaNoted = true;
-      log('Lua results need shell escape: not in the browser engine yet');
-    }
   })().finally(() => { P.starting = null; });
   return P.starting;
 }
@@ -282,6 +283,7 @@ function command(text) {
   const run = P.run;
   if (!run) return;
   const [p, n] = run.cstr(text);
+  run.toEnd = false;
   try { run.drv._txp_wasm_input(p, n); } catch (e) { fail(e); return; }
   run.drv._free(p);
   pump();
@@ -305,13 +307,154 @@ function step() {
     while (more && performance.now() - t0 < 30) more = !!run.drv._txp_wasm_tick();
   } catch (e) { fail(e); return; }
   if (run.failed) { fail(new Error('the engine stopped')); return; }
+  // the format is complete once a page is out: keep it (once)
+  if (!run.formatSaved && P.pages.size) {
+    run.formatSaved = true;
+    saveFormat(run.engine.FS).catch(e => log('format not saved: ' + e));
+  }
   if (more) { pump(); return; }
+  // the pages in view are done
+  if (P.lastMsg.status && P.lastMsg.status.busy && P.lastMsg.status.text === 'typesetting') status('live', false);
+  // after a pause in typing only (as the helper's latexmk), so that edits
+  // stay fast:
+  const quiet = BACKGROUND_PAUSE - (performance.now() - P.lastActivity);
+  if (quiet > 0) { setTimeout(pump, quiet + 5); return; }
+  // The view is done: go on to the end of the document in the background,
+  // then give the outputs (.aux, .toc, ...) back as inputs (a second pass).
+  try {
+    if (!run.drv._txp_wasm_status()) {
+      if (!run.toEnd) { run.toEnd = true; run.drv._txp_wasm_run_to_end(); pump(); return; }
+    } else if (secondPass(run)) {
+      return;
+    }
+  } catch (e) { fail(e); return; }
   // idle
   const st = run.kernel.stats;
   if (tl) log(`TeX Live: ${tl.stats.downloads} packages downloaded (${Math.round(tl.stats.downloadBytes / 1048576)} MiB), ${tl.stats.fromCache} from the store`);
   log(`idle: forks ${st.forks}, restores ${st.restores}, snapshots ${Math.round(st.snapMs)} ms, restores ${Math.round(st.restoreMs)} ms, engine ${Math.round(st.runMs)} ms`);
   if (P.lastMsg.status && P.lastMsg.status.busy) status('live', false);
-  if (!run.formatSaved) { run.formatSaved = true; saveFormat(run.engine.FS).catch(e => log('format not saved: ' + e)); }
+}
+
+// The second pass, as latexmk: the files the run wrote that a next run reads
+// (.aux, .toc, .out, ...) go back to TeXpresso as edits, when they changed.
+// TeXpresso then goes back to where it read them. If the .aux names a
+// bibliography (\bibdata), BibTeX makes the .bbl first. At most 3 passes per
+// change.
+const BACKGROUND_PAUSE = 2000;   // ms without edits before the second pass (helper: LUA_IDLE)
+
+function secondPass(run) {
+  if (run.passes >= 3 || run.bibBusy) return run.bibBusy;
+  const [p] = run.cstr('/outputs.bin');
+  const count = run.drv._txp_wasm_dump_outputs(p);
+  run.drv._free(p);
+  if (count <= 0) return false;
+  const buf = run.drv.FS.readFile('/outputs.bin');
+  const outputs = new Map();
+  for (let i = 0; i < buf.length; ) {
+    const nl1 = buf.indexOf(10, i), nl2 = buf.indexOf(10, nl1 + 1);
+    let path = new TextDecoder().decode(buf.subarray(i, nl1));
+    const len = +new TextDecoder().decode(buf.subarray(nl1 + 1, nl2));
+    const data = buf.slice(nl2 + 1, nl2 + 1 + len);
+    i = nl2 + 1 + len;
+    if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
+    const rel = safeRel(path);
+    if (rel && !P.files.has(rel)) outputs.set(rel, data);
+  }
+  // BibTeX
+  const job = P.main.replace(/\.tex$/, '');
+  const aux = outputs.get(`${job}.aux`);
+  if (aux && /\\bibdata\{/.test(new TextDecoder().decode(aux))) {
+    const input = bibtexInput(outputs, job);
+    if (input.key !== run.bibKey) {
+      run.bibBusy = true;
+      runBibtex(input, job).then((bbl) => {
+        run.bibKey = input.key;
+        run.bbl = bbl;
+      }).catch((e) => log('bibtex: ' + e)).finally(() => { run.bibBusy = false; if (P.run === run) pump(); });
+      return true;
+    }
+    if (run.bbl) outputs.set(`${job}.bbl`, run.bbl);
+  } else if (P.overleafBbl && outputs.has(`${job}.bcf`)) {
+    // biblatex: Biber does not run here; Overleaf's .bbl of its last compile
+    outputs.set(`${job}.bbl`, P.overleafBbl);
+  }
+  const changed = [];
+  for (const [rel, data] of outputs) {
+    if (/\.(bcf|run\.xml)$/.test(rel)) continue;     // for Biber, not read by TeX
+    const old = P.feedback.get(rel);
+    if (!old || old.length !== data.length || old.some((b, k) => b !== data[k])) changed.push([rel, data]);
+  }
+  if (!changed.length) return false;
+  run.passes++;
+  log(`second pass ${run.passes}: ${changed.map(c => c[0]).join(', ')}`);
+  for (const [rel, data] of changed) {
+    P.feedback.set(rel, data);
+    command(`(open ${sexpString(rel)} ${sexpString(new TextDecoder().decode(data))})`);
+  }
+  return true;
+}
+
+// The files BibTeX reads: the .aux files, the .bib files (project or TeX
+// Live) and the .bst file. key: changes when BibTeX's result can change.
+function bibtexInput(outputs, job) {
+  const files = new Map();
+  let key = '';
+  const dec = new TextDecoder();
+  for (const [rel, data] of outputs) {
+    if (!rel.endsWith('.aux')) continue;
+    files.set(rel, data);
+    // only the lines BibTeX reads (not \newlabel, ... of each pass)
+    key += rel + '\n' + dec.decode(data).split('\n')
+      .filter(l => /^\\(citation|bibdata|bibstyle|@input)\{/.test(l)).join('\n') + '\n';
+  }
+  const text = [...files.values()].map(d => dec.decode(d)).join('\n');
+  const names = (re) => [...text.matchAll(re)].flatMap(m => m[1].split(',')).map(n => n.trim()).filter(Boolean);
+  const find = (name, ext) => {
+    const file = name.endsWith(ext) ? name : name + ext;
+    const mainDir = P.main.includes('/') ? P.main.slice(0, P.main.lastIndexOf('/') + 1) : '';
+    for (const dir of [mainDir, '', ...includeDirs().map(d => d + '/')]) {
+      const rel = safeRel(dir + file);
+      if (rel && P.files.has(rel)) return P.files.get(rel);
+    }
+    return tl && tl.findByName(file);
+  };
+  for (const name of names(/\\bibdata\{([^}]*)\}/g)) {
+    const data = find(name, '.bib');
+    if (data) { files.set(name.endsWith('.bib') ? name : name + '.bib', data); key += `${name}:${hashBytes(data)}\n`; }
+  }
+  for (const name of names(/\\bibstyle\{([^}]*)\}/g)) {
+    const data = find(name, '.bst');
+    if (data) { files.set(name.endsWith('.bst') ? name : name + '.bst', data); key += `${name}.bst:${hashBytes(data)}\n`; }
+  }
+  return { files, key };
+}
+
+function hashBytes(data) {
+  let h = 2166136261;
+  for (let i = 0; i < data.length; i++) h = Math.imul(h ^ data[i], 16777619);
+  return (h >>> 0).toString(16) + ':' + data.length;
+}
+
+// Runs BibTeX (bibtex.wasm, a new instance each time) and returns the .bbl.
+async function runBibtex(input, job) {
+  const t0 = performance.now();
+  let out = '';
+  const m = await createBibtex({ print: (s) => { out += s + '\n'; }, printErr: (s) => { out += s + '\n'; } });
+  m.FS.mkdirTree('/work');
+  m.FS.chdir('/work');
+  for (const [rel, data] of input.files) {
+    const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+    if (dir) m.FS.mkdirTree(dir);
+    m.FS.writeFile(rel, data);
+  }
+  let code;
+  try { code = m.callMain([`${job}.aux`]); } catch (e) { code = e && e.status !== undefined ? e.status : 3; }
+  let bbl = null;
+  try { bbl = m.FS.readFile(`${job}.bbl`); } catch (e) { /* none */ }
+  const warnings = out.split('\n').filter(l => /^Warning--|error message|^I (couldn't|found no)/.test(l));
+  log(`bibtex: exit ${code}, ${bbl ? bbl.length : 0} bytes, ${Math.round(performance.now() - t0)} ms` +
+      (warnings.length ? ` (${warnings.slice(0, 5).join('; ')})` : ''));
+  return bbl;
 }
 
 function fail(e) {
@@ -375,7 +518,8 @@ const handlers = {
     if (!id) return;
     if (P.id !== id) {          // one project at a time: another one takes over
       stop();
-      Object.assign(P, { id, files: new Map(), pages: new Map(), lastMsg: {}, main: '', luaNoted: false });
+      Object.assign(P, { id, files: new Map(), pages: new Map(), lastMsg: {}, main: '', luaNoted: false,
+        feedback: new Map(), overleafBbl: null });
     }
     P.clients.add(client);
     if (msg.main) P.main = msg.main;
@@ -401,11 +545,24 @@ const handlers = {
     P.files.set(rel, new TextEncoder().encode(text));
     if (!P.run) { await start(); }
     writeProjectFile(rel, P.files.get(rel));
+    P.lastActivity = performance.now();
+    if (P.run) P.run.passes = 0;
     command(`(open ${sexpString(rel)} ${sexpString(text)})`);
+  },
+  // a file from Overleaf's last compile: output.bbl (Biber, for biblatex)
+  file(client, msg) {
+    if (msg.path !== 'output.bbl' || typeof msg.text !== 'string') return;
+    const data = new TextEncoder().encode(msg.text);
+    const old = P.overleafBbl;
+    if (old && old.length === data.length && old.every((b, k) => b === data[k])) return;
+    P.overleafBbl = data;
+    log(`Overleaf's .bbl: ${data.length} bytes`);
+    if (P.run) { P.run.passes = 0; pump(); }
   },
   view(client, msg) {
     P.first = Math.max(0, msg.first | 0);
     P.last = Math.max(P.first, Math.min(P.first + 20, msg.last | 0));
+    P.lastActivity = performance.now();
     for (let page = P.first; page <= P.last; page++) if (P.pages.has(page)) send(P.pages.get(page), client);
     command(`(export-range ${P.first} ${P.last})`);
   },

@@ -175,6 +175,16 @@ class TexLive {
     return true;
   }
 
+  // A TeX Live file by its name (for BibTeX's .bst and .bib files): its data,
+  // or null. The package is downloaded if needed.
+  findByName(name) {
+    const base = name.slice(name.lastIndexOf('/') + 1);
+    const rels = this.byBase.get(base);
+    if (!rels) return null;
+    const rel = rels.find(r => r.startsWith('bibtex/')) || rels[0];
+    return this.read(`${TL_DIST}/${rel}`);
+  }
+
   // host_tl_stat: what the format records for its TeX Live dependencies
   stat(path) {
     if (!path || !path.startsWith(TL_ROOT + '/')) return null;

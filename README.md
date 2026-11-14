@@ -113,6 +113,13 @@ browser** in the Live menu (the default).
   A new package (for example a new `\usepackage`) adds approx. 0.1-1 s one
   time.
 - An edit shows in approx. 0.15-0.4 s (native TeXpresso: 0.1-0.15 s).
+- **Second pass, BibTeX, biblatex:** 2 s after you stop typing, TeXpresso
+  goes on to the end of the document, and its `.aux`, `.toc`, `.out`, ...
+  files go back in as inputs (as latexmk does). So the table of contents,
+  `\ref`, `\pageref` and "Page n / N" are correct. If the document uses
+  BibTeX (`\bibliography`), BibTeX runs in the extension and makes the
+  `.bbl`. For biblatex (Biber), the extension uses the `.bbl` of Overleaf's
+  last compile: click **Recompile** in Overleaf after you add a citation.
 - **Lua results** (calc, fsm) are always on and update while you type. A Lua
   5.4 sandbox in the extension runs them; it has no shell and no access to
   your PC. The engine reports a restricted shell escape that allows only
@@ -137,7 +144,7 @@ browser** in the Live menu (the default).
 - After an edit, pages that are not in view are updated when you scroll to them.
 - The extension uses Overleaf's unsupported hook for extensions (`UNSTABLE_editor:extensions`). An Overleaf update can break it.
 - The extension reads edits only for the open file, but these include edits by collaborators. Changes in other files come with the next Sync.
-- TeXpresso does not run BibTeX. With Lua on, the normal compile makes the `.bbl` file, and TeXpresso uses it.
+- WSL helper: TeXpresso does not run BibTeX. With Lua on, the normal compile makes the `.bbl` file, and TeXpresso uses it. (The browser engine runs BibTeX itself; see "Browser engine".)
 
 ## If it does not work
 
