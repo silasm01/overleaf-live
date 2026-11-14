@@ -86,7 +86,7 @@ It gets the newest version from GitHub, rebuilds TeXpresso only when its patch c
 3. The pages are one under the other. TeXpresso typesets up to the last page in view, so `/ 3+` means "at least 3 pages". The pages under the visible ones are typeset when you scroll to them.
 4. The **Live** button shows the status: a green dot is live, an orange dot is busy (typesetting, sending files, Lua), and a red dot shows the number of LaTeX errors. Click it for the menu:
    - the status and the LaTeX errors with line numbers
-   - **Lua results**: for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn it on only for projects you trust (yours). The setting is saved for each project.
+   - **Lua results** (WSL helper only; in the browser engine they are always on): for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn it on only for projects you trust (yours). The setting is saved for each project.
    - **Sync files**: sends all project files again. The extension does this automatically when you open another file. Overleaf allows 10 downloads a minute, so the extension waits at least 10 seconds between syncs.
    - **Turn off Live**: Overleaf's own PDF and toolbar again.
 5. **Cursor in the PDF (SyncTeX)**: an orange caret on the live page shows where the editor cursor is. It moves when you move the cursor or type. The PDF scrolls only when the caret is out of view. A **double-click** on a live page moves the editor cursor to that text, and opens its file when it is another file. Overleaf's two arrow buttons between the editor and the PDF still use Overleaf's own compiled PDF.
@@ -113,11 +113,16 @@ browser** in the Live menu (the default).
   A new package (for example a new `\usepackage`) adds approx. 0.1-1 s one
   time.
 - An edit shows in approx. 0.15-0.4 s (native TeXpresso: 0.1-0.15 s).
+- **Lua results** (calc, fsm) are always on and update while you type. A Lua
+  5.4 sandbox in the extension runs them; it has no shell and no access to
+  your PC. The engine reports a restricted shell escape that allows only
+  `kpsewhich` and `texlua`. For this, the project needs the luabridge.tex of
+  latex-templates from 14 November 2026 or later (it runs texlua also with a
+  restricted shell escape when texlua is allowed).
 - **Limits for now:**
   - Fonts by file name only (`\setmainfont{texgyrepagella}[Extension=.otf, ...]`
     or a font file in the project). Font names through fontconfig
     (`\setmainfont{TeX Gyre Pagella}`) are not supported yet.
-  - **Lua results** (shell escape) work only with the WSL helper.
   - One project at a time: a second project's tab takes over the engine.
 
 ## Requirements for a project

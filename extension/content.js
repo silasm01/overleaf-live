@@ -54,7 +54,7 @@
             <option value="browser">In the browser</option>
             <option value="wsl">WSL helper</option>
           </select></label>
-        <label class="olive-menu-lua" title="Runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust. Only with the WSL helper (for now).">
+        <label class="olive-menu-lua" title="WSL helper: runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust. In the browser engine, Lua results are always on (a Lua sandbox, no shell).">
           <input type="checkbox" class="olive-lua"> Lua results (shell escape)</label>
         <div class="olive-menu-buttons">
           <button class="olive-sync" title="Send all project files again">Sync files</button>
@@ -88,7 +88,9 @@
     $(".olive-menu-status").textContent = connected ? status.text
       : engine === "wsl" ? "Helper not running (start it in WSL)." : "Engine not running.";
     $(".olive-engine").value = engine;
+    // the browser engine runs Lua live in a sandbox: always on
     $(".olive-lua").disabled = engine !== "wsl";
+    $(".olive-lua").checked = engine === "wsl" ? settings.lua : true;
     const box = $(".olive-menu-errors");
     box.hidden = !errors.length;
     box.textContent = errors.map((l) => "! " + l).join("\n");
@@ -623,7 +625,7 @@
   function apply() {
     const was = !pane.hidden;
     pane.hidden = !settings.on;
-    $(".olive-lua").checked = settings.lua;
+    $(".olive-lua").checked = engine === "wsl" ? settings.lua : true;
     if (settings.on && !port) connect();
     if (!settings.on) {
       disconnect();
@@ -741,7 +743,7 @@
     const luaChanged = next.lua !== settings.lua;
     settings = Object.assign(settings, next);
     if (turned) apply();
-    else if (luaChanged) $(".olive-lua").checked = settings.lua;
+    else if (luaChanged) $(".olive-lua").checked = engine === "wsl" ? settings.lua : true;
   });
 
   chrome.storage.local.get([settingsKey, "engine"], (r) => {

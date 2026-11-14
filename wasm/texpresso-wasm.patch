@@ -231,6 +231,60 @@ index d48030f..adb52f2 100644
  
      tex_fontmap_entry *hashtable =
        fz_malloc_struct_array(ctx, capacity, tex_fontmap_entry);
+diff --git a/src/engine/engine/xetex-ini.c b/src/engine/engine/xetex-ini.c
+index 092777c..ae8643b 100644
+--- a/src/engine/engine/xetex-ini.c
++++ b/src/engine/engine/xetex-ini.c
+@@ -18,6 +18,7 @@
+ 
+ /* All the following variables are declared in xetex-xetexd.h */
+ bool shell_escape_enabled = false;
++int shell_escape_level = 1; /* \shellescape when enabled: 1 unrestricted, 2 restricted */
+ memory_word *eqtb;
+ int32_t bad;
+ char *name_of_file;
+diff --git a/src/engine/engine/xetex-io.c b/src/engine/engine/xetex-io.c
+index d04fd7a..018d1e1 100644
+--- a/src/engine/engine/xetex-io.c
++++ b/src/engine/engine/xetex-io.c
+@@ -26,7 +26,11 @@ tt_xetex_open_input (int filefmt)
+ 
+     if (filefmt == TTBC_FILE_FORMAT_TECTONIC_PRIMARY) {
+         handle = ttstub_input_open_primary ();
+-    } else if (name_of_file[0] == '|') {
++    } else if (name_of_file[0] == '|'
++#ifdef __EMSCRIPTEN__
++               && !shell_escape_enabled
++#endif
++               ) {
+         // Tectonic TODO: issue #859. In mainline XeTeX, a pipe symbol indicates
+         // piped input from an external command via `popen()`. Now that we have
+         // shell-escape support we could also support this, but we don't have a
+diff --git a/src/engine/engine/xetex-xetex0.c b/src/engine/engine/xetex-xetex0.c
+index 68e3082..753a3cf 100644
+--- a/src/engine/engine/xetex-xetex0.c
++++ b/src/engine/engine/xetex-xetex0.c
+@@ -7644,7 +7644,7 @@ restart:
+                     // 1 if enabled & unrestricted
+                     // 2 if enabled but restricted (which isn't currently supported)
+                     if (shell_escape_enabled) {
+-                        cur_val = 1;
++                        cur_val = shell_escape_level;
+                     } else {
+                         cur_val = 0;
+                     }
+diff --git a/src/engine/engine/xetex-xetexd.h b/src/engine/engine/xetex-xetexd.h
+index ee3637a..27c1f50 100644
+--- a/src/engine/engine/xetex-xetexd.h
++++ b/src/engine/engine/xetex-xetexd.h
+@@ -387,6 +387,7 @@ void remember_source_info(str_number, int);
+ 
+ /* All the following variables are defined in xetexini.c */
+ extern bool shell_escape_enabled;
++extern int shell_escape_level;
+ extern memory_word *eqtb;
+ extern int32_t bad;
+ extern char *name_of_file;
 diff --git a/src/engine/main/fork.c b/src/engine/main/fork.c
 index d5b5013..e85632d 100644
 --- a/src/engine/main/fork.c
@@ -289,7 +343,7 @@ index d5b5013..e85632d 100644
  }
 +#endif
 diff --git a/src/engine/main/main.c b/src/engine/main/main.c
-index 333408e..0bac93e 100644
+index 333408e..4e6e1a2 100644
 --- a/src/engine/main/main.c
 +++ b/src/engine/main/main.c
 @@ -1,5 +1,7 @@
@@ -339,6 +393,27 @@ index 333408e..0bac93e 100644
      if (!texpresso)
      {
        fprintf(stderr, "Failed to connect to TeXpresso.\n");
+@@ -1063,6 +1072,20 @@ int main(int argc, char **argv)
+     }
+     synctex_enabled = 1;
+     synctex_texpresso_extension = 1;
++#ifdef __EMSCRIPTEN__
++    // WASM (browser): TeXpresso's driver runs piped input ("\\input|cmd")
++    // for kpsewhich and texlua in a Lua sandbox (frontend/txp_lua.c), as a
++    // restricted shell escape (\\shellescape = 2): TEXPRESSO_SHELL_ESCAPE=2.
++    // \\write18 still runs nothing.
++    {
++      const char *se = getenv("TEXPRESSO_SHELL_ESCAPE");
++      if (se && atoi(se) > 0)
++      {
++        shell_escape_enabled = 1;
++        shell_escape_level = atoi(se);
++      }
++    }
++#endif
+   }
+ 
+   // Generate document
 diff --git a/src/engine/main/texpresso_protocol.c b/src/engine/main/texpresso_protocol.c
 index 3096732..3d14cd4 100644
 --- a/src/engine/main/texpresso_protocol.c
@@ -397,7 +472,7 @@ index 3096732..3d14cd4 100644
  txp_client *txp_connect(FILE *file)
  {
 diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
-index 5d275b2..ea3d654 100644
+index 5d275b2..58efd77 100644
 --- a/src/frontend/engine_tex.c
 +++ b/src/frontend/engine_tex.c
 @@ -137,6 +137,19 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q);
@@ -442,7 +517,7 @@ index 5d275b2..ea3d654 100644
      p->fd = -1;
    }
  }
-@@ -587,6 +606,21 @@ static bool need_snapshot(fz_context *ctx, struct tex_engine *self, int time)
+@@ -587,9 +606,136 @@ static bool need_snapshot(fz_context *ctx, struct tex_engine *self, int time)
      last_time = 0;
    }
  
@@ -464,7 +539,134 @@ index 5d275b2..ea3d654 100644
    return time > 500 + last_time;
  }
  
-@@ -1168,7 +1202,21 @@ static int compute_fences(fz_context *ctx, struct tex_engine *self, int trace, i
++#ifdef __EMSCRIPTEN__
++// --- Piped input ("\input|cmd", WASM build) ----------------------------------
++// The engine sends "|cmd" as the name of a file to read. The command runs in
++// txp_lua.c (kpsewhich, texlua). Its file access uses the same file table as
++// the engine, with the rollback log:
++// - a read of an input file is recorded as "seen completely" at this time, so
++//   an edit of the file goes back to here (as for a file the engine reads);
++// - a write replaces the file's data as an engine output (logged);
++// - the output of the command becomes the data of the entry "|cmd".
++#include "txp_lua.h"
++
++struct pipe_env {
++  fz_context *ctx;
++  struct tex_engine *self;
++  int time;
++};
++
++static const char *pipe_read(void *env, const char *path, size_t *len)
++{
++  struct pipe_env *pe = env;
++  struct tex_engine *self = pe->self;
++  fz_context *ctx = pe->ctx;
++  char buf[1024];
++  const char *fs_path = NULL;
++
++  fileentry_t *e = filesystem_lookup(self->fs, path);
++  if (!e || !entry_data(e))
++  {
++    fs_path = lookup_path(self, path, buf, NULL);
++    if (!fs_path)
++    {
++      e = filesystem_lookup_or_create(ctx, self->fs, path);
++      log_fileentry(ctx, self->log, e);
++      record_seen(self, e, INT_MAX, pe->time);
++      return NULL;
++    }
++  }
++  if (!e)
++    e = filesystem_lookup_or_create(ctx, self->fs, path);
++  log_fileentry(ctx, self->log, e);
++  if (e->saved.level < FILE_READ)
++  {
++    if (!fs_path)
++      fs_path = lookup_path(self, path, buf, NULL);
++    if (!fs_path)
++    {
++      if (!e->edit_data)
++        return NULL;
++      memset(&e->fs_stat, 0, sizeof(e->fs_stat));
++    }
++    else
++    {
++      if (fs_path == path)
++        fs_path = e->path;
++      fz_try(ctx)
++        e->fs_data = fz_read_file(ctx, fs_path);
++      fz_catch(ctx)
++        return NULL;
++      stat(fs_path, &e->fs_stat);
++    }
++    e->saved.level = FILE_READ;
++  }
++  // an input file (not written in this run): changes go back to here
++  if (!e->saved.data)
++    record_seen(self, e, INT_MAX, pe->time);
++  fz_buffer *data = entry_data(e);
++  if (!data)
++    return NULL;
++  *len = data->len;
++  // a NUL after the data (the buffer may have no room: copy)
++  static fz_buffer *copy;
++  if (copy)
++    fz_drop_buffer(ctx, copy);
++  copy = fz_new_buffer(ctx, data->len + 1);
++  fz_append_data(ctx, copy, data->data, data->len);
++  fz_terminate_buffer(ctx, copy);
++  return (const char *)copy->data;
++}
++
++static void pipe_write(void *env, const char *path, const char *data, size_t len)
++{
++  struct pipe_env *pe = env;
++  struct tex_engine *self = pe->self;
++  fz_context *ctx = pe->ctx;
++  fileentry_t *e = filesystem_lookup_or_create(ctx, self->fs, path);
++  log_fileentry(ctx, self->log, e);
++  if (e->seen < 0)
++    record_seen(self, e, 0, pe->time);
++  // as Q_OPWR: the old buffer stays with the log
++  e->saved.data = fz_new_buffer_from_copied_data(ctx, (const unsigned char *)data, len);
++  e->saved.level = FILE_WRITE;
++  self->aux_dirty = true;
++}
++
++// Runs the pipe; returns its entry (data = the output of the command).
++static fileentry_t *run_pipe(fz_context *ctx, struct tex_engine *self, query_t *q)
++{
++  struct pipe_env pe = { ctx, self, q->time };
++  txp_lua_io io = { &pe, pipe_read, pipe_write };
++  char *out = NULL;
++  size_t outlen = 0;
++  txp_pipe_run(q->open.path + 1, &io, &out, &outlen);
++  fprintf(stderr, "[pipe] %s: %d bytes\n", q->open.path + 1, (int)outlen);
++  fileentry_t *e = filesystem_lookup_or_create(ctx, self->fs, q->open.path);
++  log_fileentry(ctx, self->log, e);
++  e->saved.data = fz_new_buffer_from_copied_data(ctx, (const unsigned char *)out, outlen);
++  e->saved.level = FILE_READ;
++  free(out);
++  return e;
++}
++#endif
++
+ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q)
+ {
+   process_t *p = get_process(self);
+@@ -608,6 +754,11 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q)
+       char fs_path_buffer[1024];
+       const char *fs_path = NULL;
+ 
++#ifdef __EMSCRIPTEN__
++      if (q->tag == Q_OPRD && q->open.path[0] == '|')
++        e = run_pipe(ctx, self, q);
++      else
++#endif
+       if (q->tag == Q_OPRD)
+       {
+         e = filesystem_lookup(self->fs, q->open.path);
+@@ -1168,7 +1319,21 @@ static int compute_fences(fz_context *ctx, struct tex_engine *self, int trace, i
    while (target_process >= 0 && self->processes[target_process].trace_len > trace)
      target_process -= 1;
    int target_trace = target_process >= 0 ? self->processes[target_process].trace_len : -1;
@@ -781,3 +983,585 @@ index 4854531..52f05f4 100644
  #define MAX_FILES 1024
  
  enum accesslevel {
+diff --git a/src/frontend/txp_lua.c b/src/frontend/txp_lua.c
+new file mode 100644
+index 0000000..bb38420
+--- /dev/null
++++ b/src/frontend/txp_lua.c
+@@ -0,0 +1,543 @@
++// txp_lua.c -- piped input for the WASM build of TeXpresso (see txp_lua.h).
++//
++// The engine sends "|cmd" as a file name. The driver (engine_tex.c) runs it
++// here. kpsewhich answers from TeXpresso's own file lookup. texlua runs the
++// script in a fresh Lua 5.4 state with a sandboxed io/os library: files are
++// read from and written to TeXpresso's file table (callbacks in txp_lua_io),
++// there is no os.execute, io.popen or real file system, and a step limit stops
++// endless loops.
++
++#include "txp_lua.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "lua.h"
++#include "lauxlib.h"
++#include "lualib.h"
++
++typedef struct {
++  char *data;
++  size_t len, cap;
++} strbuf;
++
++static void sb_add(strbuf *b, const char *s, size_t n)
++{
++  if (b->len + n + 1 > b->cap)
++  {
++    size_t cap = b->cap ? b->cap * 2 : 256;
++    while (cap < b->len + n + 1)
++      cap *= 2;
++    char *d = realloc(b->data, cap);
++    if (!d)
++      abort();
++    b->data = d;
++    b->cap = cap;
++  }
++  memcpy(b->data + b->len, s, n);
++  b->len += n;
++  b->data[b->len] = 0;
++}
++
++static void sb_str(strbuf *b, const char *s) { sb_add(b, s, strlen(s)); }
++
++// --- command line --------------------------------------------------------
++
++// Splits a command line as sh does for simple cases: spaces, '...' and
++// "..." quotes, and \ escapes in "..." and outside quotes.
++static int split_args(const char *cmd, char ***argvp)
++{
++  int argc = 0, cap = 8;
++  char **argv = malloc(sizeof(char *) * cap);
++  const char *p = cmd;
++  for (;;)
++  {
++    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
++      p++;
++    if (!*p)
++      break;
++    strbuf arg = {0};
++    sb_add(&arg, "", 0);
++    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
++    {
++      if (*p == '\'')
++      {
++        const char *e = strchr(p + 1, '\'');
++        if (!e)
++          e = p + strlen(p);
++        sb_add(&arg, p + 1, e - p - 1);
++        p = *e ? e + 1 : e;
++      }
++      else if (*p == '"')
++      {
++        p++;
++        while (*p && *p != '"')
++        {
++          if (*p == '\\' && p[1] && strchr("\"\\$`", p[1]))
++            p++;
++          sb_add(&arg, p, 1);
++          p++;
++        }
++        if (*p)
++          p++;
++      }
++      else
++      {
++        if (*p == '\\' && p[1])
++          p++;
++        sb_add(&arg, p, 1);
++        p++;
++      }
++    }
++    if (argc + 1 >= cap)
++      argv = realloc(argv, sizeof(char *) * (cap *= 2));
++    argv[argc++] = arg.data;
++  }
++  argv[argc] = NULL;
++  *argvp = argv;
++  return argc;
++}
++
++static void free_args(int argc, char **argv)
++{
++  for (int i = 0; i < argc; i++)
++    free(argv[i]);
++  free(argv);
++}
++
++// --- kpsewhich -------------------------------------------------------------
++
++static const char *opt_value(const char *arg, const char *name, int *consumed,
++                             int i, int argc, char **argv)
++{
++  // -name=value, --name=value, -name value
++  const char *a = arg;
++  if (*a == '-') a++;
++  if (*a == '-') a++;
++  size_t n = strlen(name);
++  if (strncmp(a, name, n) != 0)
++    return NULL;
++  if (a[n] == '=')
++  {
++    *consumed = 1;
++    return a + n + 1;
++  }
++  if (a[n] == 0 && i + 1 < argc)
++  {
++    *consumed = 2;
++    return argv[i + 1];
++  }
++  return NULL;
++}
++
++static int run_kpsewhich(int argc, char **argv, txp_lua_io *io, strbuf *out)
++{
++  const char *format = NULL;
++  for (int i = 1; i < argc; )
++  {
++    const char *v;
++    int used = 1;
++    if ((v = opt_value(argv[i], "var-value", &used, i, argc, argv)))
++    {
++      // the commands this "restricted shell escape" can run
++      if (strcmp(v, "shell_escape_commands") == 0)
++        sb_str(out, "kpsewhich,texlua\n");
++      else if (strcmp(v, "shell_escape") == 0)
++        sb_str(out, "p\n");
++      i += used;
++    }
++    else if ((v = opt_value(argv[i], "format", &used, i, argc, argv)) ||
++             (v = opt_value(argv[i], "progname", &used, i, argc, argv)) ||
++             (v = opt_value(argv[i], "engine", &used, i, argc, argv)))
++    {
++      if (strncmp(argv[i] + (argv[i][1] == '-' ? 2 : 1), "format", 6) == 0)
++        format = v;
++      i += used;
++    }
++    else if (argv[i][0] == '-')
++      i++;
++    else
++    {
++      const char *name = argv[i++];
++      size_t len;
++      if (io->read(io->env, name, &len))
++      {
++        sb_str(out, name);
++        sb_str(out, "\n");
++      }
++      else if (format && strcmp(format, "tex") == 0 && !strrchr(name, '.'))
++      {
++        strbuf alt = {0};
++        sb_str(&alt, name);
++        sb_str(&alt, ".tex");
++        if (io->read(io->env, alt.data, &len))
++        {
++          sb_str(out, alt.data);
++          sb_str(out, "\n");
++        }
++        free(alt.data);
++      }
++    }
++  }
++  return 0;
++}
++
++// --- texlua ------------------------------------------------------------------
++
++static txp_lua_io *lua_io(lua_State *L)
++{
++  return (txp_lua_io *)lua_touserdata(L, lua_upvalueindex(1));
++}
++
++// __txp_read(path) -> string or nil
++static int l_read(lua_State *L)
++{
++  const char *path = luaL_checkstring(L, 1);
++  txp_lua_io *io = lua_io(L);
++  size_t len;
++  const char *data = io->read(io->env, path, &len);
++  if (!data)
++    lua_pushnil(L);
++  else
++    lua_pushlstring(L, data, len);
++  return 1;
++}
++
++// __txp_write(path, data)
++static int l_write(lua_State *L)
++{
++  const char *path = luaL_checkstring(L, 1);
++  size_t len;
++  const char *data = luaL_checklstring(L, 2, &len);
++  txp_lua_io *io = lua_io(L);
++  io->write(io->env, path, data, len);
++  return 0;
++}
++
++// The sandboxed io and os libraries, in Lua. Arguments: read, write.
++// Returns the table of what the script prints (stdout).
++static const char *SANDBOX =
++  "local rd, wr = ...\n"
++  "local out = {}\n"
++  "local File = {}\n"
++  "File.__index = File\n"
++  "File.__name = 'FILE*'\n"
++  "local function rfile(path, data) return setmetatable({path = path, data = data, pos = 1, mode = 'r'}, File) end\n"
++  "local function readone(self, f)\n"
++  "  local d = self.data\n"
++  "  if type(f) == 'number' then\n"
++  "    if self.pos > #d then return f == 0 and nil or nil end\n"
++  "    local s = d:sub(self.pos, self.pos + f - 1); self.pos = self.pos + #s; return s\n"
++  "  end\n"
++  "  local c = tostring(f):gsub('^%*', ''):sub(1, 1)\n"
++  "  if c == 'a' then local s = d:sub(self.pos); self.pos = #d + 1; return s end\n"
++  "  if self.pos > #d then return nil end\n"
++  "  if c == 'l' or c == 'L' then\n"
++  "    local e = d:find('\\n', self.pos, true)\n"
++  "    local s\n"
++  "    if e then s = d:sub(self.pos, c == 'L' and e or e - 1); self.pos = e + 1\n"
++  "    else s = d:sub(self.pos); self.pos = #d + 1 end\n"
++  "    return s\n"
++  "  end\n"
++  "  if c == 'n' then\n"
++  "    local s, e = d:find('^%s*[-+]?[%w%.]+', self.pos)\n"
++  "    if not s then return nil end\n"
++  "    self.pos = e + 1\n"
++  "    return tonumber((d:sub(s, e):gsub('^%s+', '')))\n"
++  "  end\n"
++  "  error(\"bad argument to 'read' (invalid format)\", 3)\n"
++  "end\n"
++  "function File:read(...)\n"
++  "  if self.mode ~= 'r' then return nil, 'file not open for reading' end\n"
++  "  local n = select('#', ...)\n"
++  "  if n == 0 then return readone(self, 'l') end\n"
++  "  local res = {}\n"
++  "  for i = 1, n do\n"
++  "    res[i] = readone(self, (select(i, ...)))\n"
++  "    if res[i] == nil then return table.unpack(res, 1, i) end\n"
++  "  end\n"
++  "  return table.unpack(res, 1, n)\n"
++  "end\n"
++  "function File:lines(...)\n"
++  "  local fmts = table.pack(...)\n"
++  "  return function() return self:read(table.unpack(fmts, 1, fmts.n)) end\n"
++  "end\n"
++  "function File:write(...)\n"
++  "  if not self.buf then return nil, 'file not open for writing' end\n"
++  "  for i = 1, select('#', ...) do\n"
++  "    local v = select(i, ...)\n"
++  "    if type(v) == 'number' then v = math.type(v) == 'integer' and string.format('%d', v) or string.format('%.14g', v) end\n"
++  "    self.buf[#self.buf + 1] = v\n"
++  "  end\n"
++  "  return self\n"
++  "end\n"
++  "function File:flush() return self end\n"
++  "function File:setvbuf() return true end\n"
++  "function File:seek(whence, off)\n"
++  "  whence = whence or 'cur'; off = off or 0\n"
++  "  if self.mode == 'r' then\n"
++  "    local base = whence == 'set' and 0 or whence == 'end' and #self.data or self.pos - 1\n"
++  "    self.pos = base + off + 1\n"
++  "    return self.pos - 1\n"
++  "  end\n"
++  "  return #table.concat(self.buf)\n"
++  "end\n"
++  "function File:close()\n"
++  "  if self.mode == 'w' then wr(self.path, table.concat(self.buf)) end\n"
++  "  self.mode = 'closed'\n"
++  "  return true\n"
++  "end\n"
++  "File.__close = File.close\n"
++  "File.__gc = function(self) if self.mode == 'w' then self:close() end end\n"
++  "File.__tostring = function(self) return 'file (' .. tostring(self.path) .. ')' end\n"
++  "local opened = {}\n"
++  "io = {}\n"
++  "function io.open(path, mode)\n"
++  "  mode = mode or 'r'\n"
++  "  local m = mode:sub(1, 1)\n"
++  "  if m == 'r' then\n"
++  "    local d = rd(path)\n"
++  "    if not d then return nil, path .. ': No such file or directory', 2 end\n"
++  "    if mode:find('+', 1, true) then\n"
++  "      local f = rfile(path, d); f.buf = {d}; return f\n"
++  "    end\n"
++  "    return rfile(path, d)\n"
++  "  elseif m == 'w' or m == 'a' then\n"
++  "    local f = setmetatable({path = path, buf = {}, mode = 'w'}, File)\n"
++  "    if m == 'a' then f.buf[1] = rd(path) or '' end\n"
++  "    opened[#opened + 1] = f\n"
++  "    return f\n"
++  "  end\n"
++  "  error(\"bad argument #2 to 'open' (invalid mode)\", 2)\n"
++  "end\n"
++  "io.stdout = setmetatable({path = 'stdout', buf = out, mode = 'o'}, File)\n"
++  "io.stderr = setmetatable({path = 'stderr', buf = {}, mode = 'o'}, File)\n"
++  "io.stdin = rfile('stdin', '')\n"
++  "local cur_out = io.stdout\n"
++  "function io.write(...) return cur_out:write(...) end\n"
++  "function io.read(...) return io.stdin:read(...) end\n"
++  "function io.output(f)\n"
++  "  if type(f) == 'string' then cur_out = io.open(f, 'w') elseif f then cur_out = f end\n"
++  "  return cur_out\n"
++  "end\n"
++  "function io.input(f) return io.stdin end\n"
++  "function io.lines(path, ...)\n"
++  "  if not path then return io.stdin:lines(...) end\n"
++  "  local f, e = io.open(path)\n"
++  "  if not f then error(e, 2) end\n"
++  "  return f:lines(...)\n"
++  "end\n"
++  "function io.close(f) return (f or cur_out):close() end\n"
++  "function io.type(f)\n"
++  "  if getmetatable(f) ~= File then return nil end\n"
++  "  return f.mode == 'closed' and 'closed file' or 'file'\n"
++  "end\n"
++  "function io.popen() return nil, 'io.popen is not available' end\n"
++  "function print(...)\n"
++  "  local t = table.pack(...)\n"
++  "  for i = 1, t.n do t[i] = tostring(t[i]) end\n"
++  "  out[#out + 1] = table.concat(t, '\\t', 1, t.n) .. '\\n'\n"
++  "end\n"
++  "os.execute = function() return nil, 'exit', 1 end\n"
++  "os.remove = function(p) return nil, tostring(p) .. ': os.remove is not available' end\n"
++  "os.rename = function(a, b) local d = rd(a); if not d then return nil, a .. ': No such file or directory' end; wr(b, d); return true end\n"
++  "os.tmpname = function() return 'txp-lua.tmp' end\n"
++  "os.getenv = function(name) return nil end\n"
++  "os.exit = function(code) error({txp_exit = code or 0}, 0) end\n"
++  "os.setlocale = function() return 'C' end\n"
++  "function loadfile(path, mode, env)\n"
++  "  local d = rd(path)\n"
++  "  if not d then return nil, 'cannot open ' .. tostring(path) end\n"
++  "  if env == nil then return load(d, '@' .. path, mode) end\n"
++  "  return load(d, '@' .. path, mode, env)\n"
++  "end\n"
++  "function dofile(path)\n"
++  "  local f, e = loadfile(path)\n"
++  "  if not f then error(e, 2) end\n"
++  "  return f()\n"
++  "end\n"
++  "package.path = './?.lua;./?/init.lua;?.lua'\n"
++  "package.cpath = ''\n"
++  "package.searchers = {\n"
++  "  package.searchers[1],\n"
++  "  function(name)\n"
++  "    local p = name:gsub('%.', '/')\n"
++  "    for pat in package.path:gmatch('[^;]+') do\n"
++  "      local file = pat:gsub('%?', p)\n"
++  "      if rd(file) then return loadfile(file), file end\n"
++  "    end\n"
++  "    return '\\n\\tno file for ' .. name\n"
++  "  end,\n"
++  "}\n"
++  "package.loadlib = function() return nil, 'not available' end\n"
++  "debug = nil\n"
++  "return out, opened\n";
++
++static int steps_exceeded = 0;
++static void step_hook(lua_State *L, lua_Debug *ar)
++{
++  (void)ar;
++  steps_exceeded = 1;
++  luaL_error(L, "the Lua code takes too long (step limit)");
++}
++
++static int run_texlua(int argc, char **argv, txp_lua_io *io, strbuf *out)
++{
++  if (argc < 2)
++    return 0;
++  const char *script = argv[1];
++  size_t script_len;
++  const char *script_data = io->read(io->env, script, &script_len);
++  if (!script_data)
++  {
++    fprintf(stderr, "[pipe] texlua: %s not found\n", script);
++    return 0;
++  }
++  char *code = malloc(script_len + 1);
++  memcpy(code, script_data, script_len);
++  code[script_len] = 0;
++  // texlua skips a first line that starts with #
++  const char *body = code;
++  size_t body_len = script_len;
++
++  lua_State *L = luaL_newstate();
++  luaL_openlibs(L);
++
++  // the sandbox
++  lua_pushlightuserdata(L, io);
++  lua_pushcclosure(L, l_read, 1);
++  lua_pushlightuserdata(L, io);
++  lua_pushcclosure(L, l_write, 1);
++  int status = luaL_loadbuffer(L, SANDBOX, strlen(SANDBOX), "=sandbox");
++  if (status != LUA_OK)
++  {
++    fprintf(stderr, "[pipe] sandbox: %s\n", lua_tostring(L, -1));
++    lua_close(L);
++    free(code);
++    return 0;
++  }
++  lua_insert(L, -3);
++  if (lua_pcall(L, 2, 2, 0) != LUA_OK)
++  {
++    fprintf(stderr, "[pipe] sandbox: %s\n", lua_tostring(L, -1));
++    lua_close(L);
++    free(code);
++    return 0;
++  }
++  int out_index = lua_absindex(L, -2);
++  int opened_index = lua_absindex(L, -1);
++
++  // arg table: arg[0] = script, arg[1..] = arguments
++  lua_createtable(L, argc - 2, 2);
++  lua_pushstring(L, "texlua");
++  lua_rawseti(L, -2, -1);
++  for (int i = 1; i < argc; i++)
++  {
++    lua_pushstring(L, argv[i]);
++    lua_rawseti(L, -2, i - 1);
++  }
++  lua_setglobal(L, "arg");
++
++  if (body_len > 0 && body[0] == '#')
++  {
++    // keep the line break, so that line numbers stay right
++    while (body_len > 0 && *body != '\n')
++      body++, body_len--;
++  }
++  strbuf chunkname = {0};
++  sb_str(&chunkname, "@");
++  sb_str(&chunkname, script);
++  status = luaL_loadbuffer(L, body, body_len, chunkname.data);
++  free(chunkname.data);
++  if (status == LUA_OK)
++  {
++    for (int i = 2; i < argc; i++)
++      lua_pushstring(L, argv[i]);
++    steps_exceeded = 0;
++    lua_sethook(L, step_hook, LUA_MASKCOUNT, 200000000);
++    status = lua_pcall(L, argc - 2, 0, 0);
++    lua_sethook(L, NULL, 0, 0);
++  }
++  if (status != LUA_OK)
++  {
++    int is_exit = 0;   // os.exit() is not an error
++    if (lua_istable(L, -1))
++    {
++      lua_getfield(L, -1, "txp_exit");
++      is_exit = !lua_isnil(L, -1);
++      lua_pop(L, 1);
++    }
++    if (!is_exit)
++      fprintf(stderr, "[pipe] texlua %s: %s\n", script,
++              lua_tostring(L, -1) ? lua_tostring(L, -1) : "error");
++    lua_pop(L, 1);
++  }
++
++  // files left open are written, as at the end of a texlua process
++  int n = (int)luaL_len(L, opened_index);
++  for (int i = 1; i <= n; i++)
++  {
++    lua_rawgeti(L, opened_index, i);
++    lua_getfield(L, -1, "mode");
++    int open = lua_isstring(L, -1) && strcmp(lua_tostring(L, -1), "w") == 0;
++    lua_pop(L, 1);
++    if (open)
++    {
++      lua_getfield(L, -1, "close");
++      lua_pushvalue(L, -2);
++      lua_pcall(L, 1, 0, 0);
++    }
++    lua_pop(L, 1);
++  }
++
++  // stdout
++  n = (int)luaL_len(L, out_index);
++  for (int i = 1; i <= n; i++)
++  {
++    lua_rawgeti(L, out_index, i);
++    size_t len;
++    const char *s = lua_tolstring(L, -1, &len);
++    if (s)
++      sb_add(out, s, len);
++    lua_pop(L, 1);
++  }
++
++  lua_close(L);
++  free(code);
++  return 0;
++}
++
++int txp_pipe_run(const char *cmd, txp_lua_io *io, char **outp, size_t *outlen)
++{
++  char **argv;
++  int argc = split_args(cmd, &argv);
++  strbuf out = {0};
++  sb_add(&out, "", 0);
++  int result = 0;
++  const char *prog = argc > 0 ? argv[0] : "";
++  const char *base = strrchr(prog, '/');
++  base = base ? base + 1 : prog;
++  if (strcmp(base, "kpsewhich") == 0)
++    run_kpsewhich(argc, argv, io, &out);
++  else if (strcmp(base, "texlua") == 0 || strcmp(base, "luatex") == 0)
++  {
++    // "luatex --luaonly script" is the same as texlua
++    if (strcmp(base, "luatex") == 0 && argc > 1 && strstr(argv[1], "luaonly"))
++    {
++      free(argv[1]);
++      memmove(argv + 1, argv + 2, sizeof(char *) * (argc - 1));
++      argc--;
++    }
++    run_texlua(argc, argv, io, &out);
++  }
++  else
++  {
++    fprintf(stderr, "[pipe] command not supported: %s\n", cmd);
++    result = -1;
++  }
++  free_args(argc, argv);
++  *outp = out.data;
++  *outlen = out.len;
++  return result;
++}
+diff --git a/src/frontend/txp_lua.h b/src/frontend/txp_lua.h
+new file mode 100644
+index 0000000..ba0d949
+--- /dev/null
++++ b/src/frontend/txp_lua.h
+@@ -0,0 +1,27 @@
++#ifndef TXP_LUA_H
++#define TXP_LUA_H
++
++#include <stddef.h>
++
++// Piped input ("\input|cmd") for the WASM build of TeXpresso: the driver
++// runs the command here, in a Lua 5.4 sandbox, as TeX Live would with a
++// restricted shell escape. Supported commands:
++//   kpsewhich [-format=x] [-var-value=name] name...
++//   texlua script args...
++// All file access goes through `io`, so TeXpresso's file table (with its
++// rollback log) stays the only file system that the engine and Lua see.
++
++typedef struct {
++  void *env;
++  // The data of a file, or NULL if it does not exist. Valid until the next
++  // call.
++  const char *(*read)(void *env, const char *path, size_t *len);
++  // Writes (replaces) a file.
++  void (*write)(void *env, const char *path, const char *data, size_t len);
++} txp_lua_io;
++
++// Runs `cmd`. The output (what the command prints) goes to *out (malloc'd,
++// *outlen bytes). Returns 0, or -1 if the command is not supported.
++int txp_pipe_run(const char *cmd, txp_lua_io *io, char **out, size_t *outlen);
++
++#endif

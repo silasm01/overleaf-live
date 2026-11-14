@@ -233,7 +233,9 @@ async function start() {
     if (!(await haveFormat())) need.push(...FORMAT_PACKAGES, ...tl.hyphenationPackages());
     const n = await tl.prefetch(need, (k, total) => status(`downloading TeX Live packages (${k} of ${total})`, true));
     lap(`${n} packages downloaded`);
-    const env = { TEXPRESSO_LSR: '/lsr.txt', XDG_CACHE_HOME: '/cache' };
+    // TEXPRESSO_SHELL_ESCAPE=2: restricted shell escape; piped input runs
+    // kpsewhich and texlua in the driver's Lua sandbox (live Lua for luabridge)
+    const env = { TEXPRESSO_LSR: '/lsr.txt', XDG_CACHE_HOME: '/cache', TEXPRESSO_SHELL_ESCAPE: '2' };
     const run = { out: '', sentErrors: null, formatSaved: false, failed: false };
     run.kernel = new Kernel({ log: s => { if (/failed/.test(s)) { run.failed = true; log(s); } } });
     run.engine = await createEngine({ kernel: run.kernel, tl, preRun: [m => Object.assign(m.ENV, env)],
@@ -241,7 +243,7 @@ async function start() {
     run.kernel.attachEngine(run.engine);
     lap('engine module ready');
     run.drv = await createDriver({ kernel: run.kernel, tl, preRun: [m => Object.assign(m.ENV, env)],
-      print: line => onLine(run, line), printErr: () => {} });
+      print: line => onLine(run, line), printErr: line => { if (line.startsWith('[pipe]')) log(line); } });
     for (const mod of [run.engine, run.drv]) {
       mod.FS.writeFile('/lsr.txt', tl.setup(mod.FS));
       mod.FS.mkdirTree(PROJECT);

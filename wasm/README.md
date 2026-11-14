@@ -1,4 +1,4 @@
-# TeXpresso in WASM (phases 1 to 4)
+# TeXpresso in WASM (phases 1 to 5)
 
 This folder builds the TeXpresso engine (`texpresso-xetex`) for WebAssembly.
 Phase 1 shows that the engine runs in a Chrome Web Worker and gives the same
@@ -176,3 +176,32 @@ Pages 1-3 after the two edits: identical to native TeXpresso.
   identical to native TeXpresso.
 - Not tested: the real mirrors (the sandbox can not reach them). If a
   mirror does not answer, the next one is used.
+
+## Phase 5a: live Lua (14 Nov 2026)
+
+- Engine: `TEXPRESSO_SHELL_ESCAPE=2` (set by worker.js) turns on a restricted
+  shell escape: `\shellescape` = 2, and piped input (`\input|"cmd"`) is sent
+  to the driver as a file named `|cmd`. `\write18` still runs nothing.
+  Restricted (not 1) keeps TikZ figure caching of latex-templates off.
+- Driver (`frontend/txp_lua.c`, `engine_tex.c`): runs the command in a Lua
+  5.4.7 sandbox (built into texpresso.wasm, +210 KB):
+  - `kpsewhich [-format=x] name`: TeXpresso's own file lookup;
+    `-var-value=shell_escape_commands` gives `kpsewhich,texlua`.
+  - `texlua script args`: a new Lua state per call, with `io`, `print`,
+    `dofile`, `loadfile`, `require` on TeXpresso's file table; no
+    `os.execute`, `io.popen` or real files; a step limit (2·10^8).
+  - Reads of input files are recorded as "seen completely", so an edit of a
+    file that Lua read goes back to the first read (as for the engine's own
+    reads). Writes are engine outputs in the rollback log. The command's
+    output becomes the data of the entry `|cmd`.
+- latex-templates `luabridge.tex`: runs texlua with `\shellescape` = 1, or = 2
+  when `kpsewhich -var-value=shell_escape_commands` lists texlua (also
+  correct for real TeX Live).
+- Test (latex-templates main.tex, 21 pages in view): 19 Lua calls, approx.
+  6 ms each. The output files of the calls are byte-identical to real
+  texlua. The pages match a real `latexmk -xelatex -shell-restricted` compile
+  with `shell_escape_commands=kpsewhich,texlua`. An edit of `\setvar{R}`
+  updates U, P and V in approx. 1 s.
+- Native build for tests of the sandbox: `gcc -I$LUA -Isrc/frontend main.c
+  src/frontend/txp_lua.c $LUA/l*.c` (without lua.c, luac.c, ltests.c), with a
+  small main that gives files from the current folder.
