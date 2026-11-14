@@ -741,10 +741,43 @@ index 5d275b2..7a5f44f 100644
                                    const char *engine_path,
                                    bool use_texlive,
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index ae65882..41b3acb 100644
+index ae65882..aa1647e 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -1905,3 +1905,209 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -525,6 +525,19 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+ 
+ static const char *relative_path(const char *path, const char *dir, int *go_up)
+ {
++#ifdef __EMSCRIPTEN__
++  // WASM (worker.js): the document folder is the current folder, "/project",
++  // given as "."; paths come as "/project/x.tex" or as "x.tex"
++  if (strcmp(dir, ".") == 0)
++  {
++    *go_up = 0;
++    if (strncmp(path, "/project/", 9) == 0)
++      path += 9;
++    while (path[0] == '.' && path[1] == '/')
++      path += 2;
++    return path;
++  }
++#endif
+   const char *rel_path = path, *dir_path = dir;
+ 
+   // Skip common parts
+@@ -1202,7 +1215,12 @@ static void interpret_command(struct persistent_state *ps,
+       }
+       else
+       {
++#ifdef __EMSCRIPTEN__
++        // ui->page is very large during the second pass (txp_wasm_run_to_end)
++        synctex_set_target(stx, export_first, path, cmd.synctex_forward.line);
++#else
+         synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
++#endif
+         synctex_set_target_column(stx, cmd.synctex_forward.column);
+         schedule_event(STDIN_EVENT);
+       }
+@@ -1905,3 +1923,209 @@ bool texpresso_main(struct persistent_state *ps)
  
    return reload;
  }
