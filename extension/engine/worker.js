@@ -7,42 +7,58 @@
 //   in:  {client, msg} | {client, closed: true} | {reset: true}
 //   out: {to: client | null (all tabs of the project), msg}
 'use strict';
-importScripts('kernel.js', 'texpresso-xetex.js', 'texpresso.js');
+importScripts('kernel.js', 'texpresso-xetex.js', 'texpresso.js', 'xzdec.js', 'texlive.js');
 
-const FIXED_TIME = 1700000000000;       // mtime of TeX files: keeps the format valid
 const PROJECT = '/project';
 const EXPORT = '/export';
 
-// --- TeX files ------------------------------------------------------------
-// Phase 3: a bundle of the TeX Live files that the latex-templates template
-// needs (tex/bundle.json + tex/bundle.bin). Phase 4 replaces it with
-// downloads of TeX Live packages on demand.
-let tex = null;
-async function loadTex() {
-  if (tex) return tex;
-  const [index, bin] = await Promise.all([
-    fetch('tex/bundle.json').then(r => r.json()),
-    fetch('tex/bundle.bin').then(r => r.arrayBuffer()).then(b => new Uint8Array(b))]);
-  tex = { index, bin, lsr: index.map(e => e[0]).filter(p => p.endsWith('/ls-R')) };
-  return tex;
+// --- TeX files: TeX Live 2025 (the version of Overleaf), downloaded on demand -
+// (texlive.js). The repository is the frozen end of TeX Live 2025
+// ("tlnet-final"); offscreen.js can give others (chrome.storage "texRepos").
+let REPOS = [
+  'https://ftp.math.utah.edu/pub/tex/historic/systems/texlive/2025/tlnet-final',
+  'https://ftp.tu-chemnitz.de/pub/tug/historic/systems/texlive/2025/tlnet-final',
+  'https://mirrors.tuna.tsinghua.edu.cn/tex-historic-archive/systems/texlive/2025/tlnet-final',
+];
+let TL_VERSION = '2025-final';
+let tl = null, tlReady = null;
+function getTl() {
+  if (!tlReady) {
+    tl = new TexLive({ repos: REPOS, version: TL_VERSION, log,
+      progress: (text) => status(text, true) });
+    tlReady = tl.init(createXz).catch((e) => { tlReady = null; throw e; });
+  }
+  return tlReady.then(() => tl);
 }
 
-function put(FS, path, data, time = FIXED_TIME) {
+// The engine's build: a new build needs a new format.
+let engineKeyP = null;
+function engineKey() {
+  if (!engineKeyP) engineKeyP = fetch('texpresso-xetex.wasm').then(r => r.arrayBuffer()).then(b => {
+    const a = new Uint8Array(b);
+    let h = a.length;
+    for (let i = 0; i < a.length; i += 997) h = (Math.imul(h, 31) + a[i]) | 0;
+    return (h >>> 0).toString(36);
+  });
+  return engineKeyP;
+}
+
+function put(FS, path, data, time = TL_FIXED_TIME) {
   FS.mkdirTree(path.slice(0, path.lastIndexOf('/')) || '/');
   FS.writeFile(path, data);
   FS.utime(path, time, time);
-}
-
-function fillTex(FS) {
-  for (const [p, off, len] of tex.index) put(FS, p, tex.bin.subarray(off, off + len));
-  FS.writeFile('/lsr.txt', tex.lsr.join('\n') + '\n');
 }
 
 // --- the format, kept between sessions (Origin Private File System) --------
 const FORMAT_DIR = '/cache/texpresso/format';
 async function formatStore() {
   const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle('format', { create: true });
+  return root.getDirectoryHandle(`format-${TL_VERSION}-${await engineKey()}`, { create: true });
+}
+async function haveFormat() {
+  const dir = await formatStore();
+  for await (const [name] of dir.entries()) if (name.endsWith('.fmt')) return true;
+  return false;
 }
 async function restoreFormat(FS) {
   try {
@@ -210,19 +226,24 @@ async function start() {
     status('starting the engine', true);
     const t0 = performance.now();
     const lap = (what) => log(`start: ${what} at ${Math.round(performance.now() - t0)} ms`);
-    await loadTex();
-    lap('TeX files loaded');
+    const tl = await getTl();
+    lap('TeX Live index ready');
+    // download what is surely needed, in parallel (the rest comes on demand)
+    const need = projectPackages(tl, P.files);
+    if (!(await haveFormat())) need.push(...FORMAT_PACKAGES, ...tl.hyphenationPackages());
+    const n = await tl.prefetch(need, (k, total) => status(`downloading TeX Live packages (${k} of ${total})`, true));
+    lap(`${n} packages downloaded`);
     const env = { TEXPRESSO_LSR: '/lsr.txt', XDG_CACHE_HOME: '/cache' };
     const run = { out: '', sentErrors: null, formatSaved: false, failed: false };
     run.kernel = new Kernel({ log: s => { if (/failed/.test(s)) { run.failed = true; log(s); } } });
-    run.engine = await createEngine({ kernel: run.kernel, preRun: [m => Object.assign(m.ENV, env)],
+    run.engine = await createEngine({ kernel: run.kernel, tl, preRun: [m => Object.assign(m.ENV, env)],
       print: () => {}, printErr: () => {} });
     run.kernel.attachEngine(run.engine);
     lap('engine module ready');
-    run.drv = await createDriver({ kernel: run.kernel, preRun: [m => Object.assign(m.ENV, env)],
+    run.drv = await createDriver({ kernel: run.kernel, tl, preRun: [m => Object.assign(m.ENV, env)],
       print: line => onLine(run, line), printErr: () => {} });
     for (const mod of [run.engine, run.drv]) {
-      fillTex(mod.FS);
+      mod.FS.writeFile('/lsr.txt', tl.setup(mod.FS));
       mod.FS.mkdirTree(PROJECT);
       for (const [rel, data] of P.files) put(mod.FS, `${PROJECT}/${rel}`, data, Date.now());
       mod.FS.chdir(PROJECT);
@@ -236,7 +257,7 @@ async function start() {
     run.cstr = cstr;
     const [incPtr] = cstr(includeDirs().map(d => d + '\0').join(''));
     const [mainPtr] = cstr(P.main);
-    if (!run.drv._txp_wasm_init(mainPtr, incPtr)) { status('the engine could not start (no TeX files)'); return; }
+    if (!run.drv._txp_wasm_init(mainPtr, incPtr)) { status('the engine could not start (no TeX Live index)'); return; }
     P.run = run;
     P.pages.clear();
     command(`(export-png ${sexpString(EXPORT)} ${P.width})`);
@@ -285,13 +306,14 @@ function step() {
   if (more) { pump(); return; }
   // idle
   const st = run.kernel.stats;
+  if (tl) log(`TeX Live: ${tl.stats.downloads} packages downloaded (${Math.round(tl.stats.downloadBytes / 1048576)} MiB), ${tl.stats.fromCache} from the store`);
   log(`idle: forks ${st.forks}, restores ${st.restores}, snapshots ${Math.round(st.snapMs)} ms, restores ${Math.round(st.restoreMs)} ms, engine ${Math.round(st.runMs)} ms`);
   if (P.lastMsg.status && P.lastMsg.status.busy) status('live', false);
   if (!run.formatSaved) { run.formatSaved = true; saveFormat(run.engine.FS).catch(e => log('format not saved: ' + e)); }
 }
 
 function fail(e) {
-  log('engine error', e);
+  log('engine error', e, e && e.stack ? e.stack.split('\n').slice(0, 12).join(' | ') : '');
   P.run = null;
   status('TeXpresso stopped (it restarts with the next edit)', false);
 }
@@ -411,6 +433,13 @@ onmessage = (e) => {
   queue = queue.then(async () => {
     try {
       if (d.reset) { P.clients.clear(); return; }
+      if (d.config) {
+        if (Array.isArray(d.config.repos) && d.config.repos.length && !tl) {
+          REPOS = d.config.repos;
+          TL_VERSION = d.config.version || ('custom-' + (hashString(REPOS.join(' ')) % 100000));
+        }
+        return;
+      }
       if (d.closed) {
         P.clients.delete(d.client);
         // no tab left: stop after a minute (a tab may reconnect, e.g. after a

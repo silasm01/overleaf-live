@@ -5,7 +5,8 @@ Chrome extension shows the page over Overleaf's PDF pane.
 
 There are two engines. You select one in the Live menu (**Engine**):
 - **In the browser** (default, since version 0.5.0): TeXpresso runs as
-  WebAssembly in Chrome. Nothing to install in WSL. See "Browser engine" below
+  WebAssembly in Chrome. Nothing to install in WSL. Since version 0.6.0,
+  TeX Live packages come from the internet when a project needs them. See "Browser engine" below
   for what it can not do yet.
 - **WSL helper**: TeXpresso runs in WSL on your PC (sections 1-4).
 
@@ -102,15 +103,20 @@ Load the extension folder (`extension/`, or the copy that `install.sh` puts in
 Windows) as an unpacked extension, as before. Then select **Engine → In the
 browser** in the Live menu (the default).
 
-- The first start in Chrome builds the XeLaTeX format (approx. 10 s). Chrome
-  keeps it, so later starts take approx. 3 s.
+- TeX Live 2025 (the version that Overleaf uses) comes from the internet
+  when a project needs it: first the package index (approx. 3 MB), then
+  each TeX Live package that the project uses. Chrome keeps all of it
+  (Origin Private File System of the extension), so each package comes only
+  one time, for all projects and all compilations.
+- The first start in Chrome downloads the packages for the XeLaTeX format
+  and builds the format (approx. 10-15 s). Later starts take approx. 3 s.
+  A new package (for example a new `\usepackage`) adds approx. 0.1-1 s one
+  time.
 - An edit shows in approx. 0.15-0.4 s (native TeXpresso: 0.1-0.15 s).
 - **Limits for now:**
-  - Only the TeX Live files that the latex-templates template needs are in the
-    extension (`extension/engine/tex/`, from TeX Live 2023). A project that
-    needs another package gives a "File ... not found" error: select
-    **Engine → WSL helper** for it. (Next step: TeX Live packages are
-    downloaded when a project needs them.)
+  - Fonts by file name only (`\setmainfont{texgyrepagella}[Extension=.otf, ...]`
+    or a font file in the project). Font names through fontconfig
+    (`\setmainfont{TeX Gyre Pagella}`) are not supported yet.
   - **Lua results** (shell escape) work only with the WSL helper.
   - One project at a time: a second project's tab takes over the engine.
 

@@ -21,7 +21,7 @@ compile() { local s=$1; local o=$O/${s//\//_}.o
 export -f compile; export O T CF PATH
 printf "%s\n" $srcs | xargs -P 2 -I{} bash -c "compile {}"
 emcc -O2 $O/*.o -o $OUT $MUPDF/build/wasm/release/libmupdf.a $MUPDF/build/wasm/release/libmupdf-third.a \
-  --js-library $HERE/js/lib-driver.js -sUSE_SDL=2 \
+  --js-library $HERE/js/lib-driver.js --js-library $HERE/js/lib-tl.js -sUSE_SDL=2 \
   -sENVIRONMENT=${DRIVER_ENV:-node,worker} -sMODULARIZE=1 -sEXPORT_NAME=createDriver -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 \
   -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=4MB -sFORCE_FILESYSTEM=1 \
   -sEXPORTED_FUNCTIONS=_txp_wasm_init,_txp_wasm_input,_txp_wasm_tick,_txp_wasm_idle,_txp_wasm_debug,_malloc,_free \

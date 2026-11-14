@@ -1,0 +1,28 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage{fontspec}
+\setmainfont{texgyrepagella}[Extension=.otf, UprightFont=*-regular, BoldFont=*-bold, ItalicFont=*-italic]
+\usepackage[danish]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{tikz}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\begin{document}
+\section{Indledning}
+Dette er en prøve på dansk orddeling i en lang sætning med mange
+sammensatte ord som arbejdsmarkedsuddannelsescenter, kommunalbestyrelsesmedlem,
+forsikringsselskabsdirektør og universitetshospitalsafdeling, der skal deles
+korrekt efter de danske regler. Æbler, ørreder og ålekvabber.
+\begin{equation}
+  \int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}, \qquad \mathbb{R}^n
+\end{equation}
+\begin{center}
+\begin{tikzpicture}
+  \draw[thick,->] (0,0) -- (3,0) node[right] {$x$};
+  \draw[thick,->] (0,0) -- (0,2) node[above] {$y$};
+  \draw[blue,domain=0:3] plot (\x,{0.2*\x*\x});
+\end{tikzpicture}
+\end{center}
+\begin{tabular}{lr}\toprule Navn & Værdi\\\midrule Æble & 3\\\bottomrule\end{tabular}
+
+\textbf{Fed}, \textit{kursiv} og \today.
+\end{document}

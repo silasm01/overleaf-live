@@ -1,4 +1,4 @@
-# TeXpresso in WASM (phases 1 to 3)
+# TeXpresso in WASM (phases 1 to 4)
 
 This folder builds the TeXpresso engine (`texpresso-xetex`) for WebAssembly.
 Phase 1 shows that the engine runs in a Chrome Web Worker and gives the same
@@ -130,3 +130,49 @@ run as two WASM modules in one worker. `js/kernel.js` connects them.
 | Edit 2 (page 3) | 0.10-0.12 s | 0.18 s | 0.15 s |
 
 Pages 1-3 after the two edits: identical to native TeXpresso.
+
+## Phase 4: TeX Live on demand (14 Nov 2026)
+
+- `extension/engine/texlive.js`: reads `tlpkg/texlive.tlpdb.xz` of a TeX Live
+  repository (default: TeX Live 2025 `tlnet-final` on 3 historic mirrors, the
+  version that Overleaf uses), and makes from it a file table (ls-R) and
+  `language.dat` (`language.us` + the `AddHyphen` lines). Packages
+  (`archive/<package>.tar.xz`, or `<package>.r<revision>.tar.xz`) are
+  downloaded when a file of the package is needed:
+  - before the start, in parallel: the packages that the project files name
+    (`\usepackage`, `\documentclass`, `\usetikzlibrary`, ...), and the packages
+    for the format if there is no format yet;
+  - during typesetting, synchronously (sync XHR in the worker), when the
+    engine or the driver opens a file of a package that is not here
+    (`host_tl_ensure`, `wasm/js/lib-tl.js`).
+- All of it is kept in the Origin Private File System (`texlive-<version>/`):
+  the index, and each package as a `.tar` file. A package comes only one
+  time, for all projects. The format key includes the TeX Live version and
+  the engine hash.
+- `wasm/xz/xzdec.c` (xz-embedded) → `xzdec.wasm` (21 KB): decompresses `.xz`.
+- Font maps: there is no `pdftex.map` (no updmap). When the driver does not
+  find a TFM font in the map, `host_tl_font_maps` gives the map files
+  (`execute addMap`) of the font's package, and the driver loads the map
+  again (`dvi_resmanager.c`).
+- Fix in `tex_fontmap.c`: an empty font map gave a table of size 0, and the
+  lookup read outside it (crash in the browser).
+- Repositories: storage key `texRepos` (a list of URLs) replaces the default
+  list (for tests). The manifest has host permissions for the 3 mirrors.
+- Test: `wasm/test/make-fake-tlnet.py` makes a test repository from the
+  TeX Live on this machine (packages by folder, `addMap` and `AddHyphen`
+  lines), served on `http://127.0.0.1:8790/tlnet`.
+
+### Results (headless Chrome 153, the extension loaded, 2-core VM, test repository)
+
+| Step | Native TeXpresso | Extension, empty store | Extension, later start |
+|---|---|---|---|
+| First page (latex-templates) | 2.1-2.4 s | 11.9-12.4 s (77 packages, 26 MiB, format build) | 2.6 s |
+| Edit 1 (page 3) | 0.12-0.15 s | 0.41-0.50 s | 0.39 s |
+| Edit 2 (page 3) | 0.10-0.12 s | 0.14-0.18 s | 0.13 s |
+
+- latex-templates pages 1-3 after the two edits: identical to native TeXpresso.
+- A Danish test document (`fontspec` with TeX Gyre Pagella by file name,
+  `babel` danish hyphenation, `amsmath`/`amssymb`, TikZ, `booktabs`):
+  identical to native TeXpresso.
+- Not tested: the real mirrors (the sandbox can not reach them). If a
+  mirror does not answer, the next one is used.

@@ -18,4 +18,8 @@ addToLibrary({
   host_drv_write: (fd, ptr, len) => { Module.kernel.driverWrite(fd, HEAPU8.slice(ptr, ptr + len)); return len; },
   host_drv_pending: (fd, timeout) => Module.kernel.driverPending(fd, timeout) ? 1 : 0,
   host_proc_age_ms: () => Module.kernel.age(),
+  host_tl_font_maps: (namePtr, out, cap) => {
+    const names = Module.tl ? Module.tl.fontMaps(UTF8ToString(namePtr)) : '';
+    return names ? stringToUTF8(names, out, cap) : 0;
+  },
 });

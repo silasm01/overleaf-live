@@ -28,5 +28,5 @@ case $MODE in
   node) LF="--pre-js $HERE/pre-node.js -sNODERAWFS=1 -sENVIRONMENT=node -sEXIT_RUNTIME=1";;
 esac
 em++ -O2 $O/*.o -o $OUT $LIBS -lexpat \
-  -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=8MB -sINITIAL_MEMORY=64MB $LF ${EXTRA_LDFLAGS:-}
+  --js-library $HERE/js/lib-tl.js -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=8MB -sINITIAL_MEMORY=64MB $LF ${EXTRA_LDFLAGS:-}
 ls -la ${OUT%.js}.*

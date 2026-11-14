@@ -25,6 +25,11 @@ let creating = null;
 
 function engineConnected(port) {
   enginePort = port;
+  // TeX Live repositories other than the default ones (for tests or a
+  // nearer mirror): chrome.storage.local "texRepos" = ["https://.../tlnet", ...]
+  chrome.storage.local.get("texRepos", (r) => {
+    if (Array.isArray(r.texRepos) && r.texRepos.length) port.postMessage({ config: { repos: r.texRepos } });
+  });
   port.onMessage.addListener((m) => {
     if (m.keepalive) return;
     const msg = m.msg;

@@ -1,5 +1,5 @@
 diff --git a/src/common/texlive_provider.c b/src/common/texlive_provider.c
-index 24d4d29..cae074c 100644
+index 24d4d29..4dfb074 100644
 --- a/src/common/texlive_provider.c
 +++ b/src/common/texlive_provider.c
 @@ -442,7 +442,15 @@ static bool list_texlive_files(void)
@@ -18,6 +18,40 @@ index 24d4d29..cae074c 100644
    if (!p)
    {
      perror("popen");
+@@ -486,8 +494,22 @@ static bool list_texlive_files(void)
+ /// @param path The path to the file.
+ /// @param size Pointer to store the file size.
+ /// @param mtime Pointer to store the modification time.
++#ifdef __EMSCRIPTEN__
++// WASM (extension/engine/texlive.js): TeX Live files are downloaded when
++// they are first needed. host_tl_ensure puts the file in this module's file
++// system (0: not available). host_tl_stat gives the size and time to record
++// for the format's dependencies: a key of the pinned TeX Live repository, so
++// that the format stays valid without the files (0: no host, use stat).
++extern int host_tl_ensure(const char *path);
++extern int host_tl_stat(const char *path, int *size, int *mtime);
++#endif
++
+ static void stat_path(const char *path, int *size, int *mtime)
+ {
++#ifdef __EMSCRIPTEN__
++  if (host_tl_stat(path, size, mtime))
++    return;
++#endif
+   struct stat st;
+   if (path && stat(path, &st) == 0)
+   {
+@@ -514,6 +536,10 @@ const char *texlive_file_path(const char *name, FILE *record_dependency)
+   }
+ 
+   const char *path = find(&table, name);
++#ifdef __EMSCRIPTEN__
++  if (path && !host_tl_ensure(path))
++    path = NULL;
++#endif
+ 
+   if (record_dependency)
+   {
 diff --git a/src/common/utils.c b/src/common/utils.c
 index cfcbb15..336c933 100644
 --- a/src/common/utils.c
@@ -61,7 +95,7 @@ index cfcbb15..336c933 100644
  
  /**
 diff --git a/src/dvi/dvi_resmanager.c b/src/dvi/dvi_resmanager.c
-index df97614..9035034 100644
+index df97614..67027ce 100644
 --- a/src/dvi/dvi_resmanager.c
 +++ b/src/dvi/dvi_resmanager.c
 @@ -116,7 +116,17 @@ static const char *kpse_find_picture(const char *name)
@@ -91,6 +125,112 @@ index df97614..9035034 100644
    result[strcspn(result, "\r\n")] = '\0';
    if (count >= N)
      return NULL;
+@@ -453,6 +464,16 @@ static fz_stream *dvi_resmanager_open_file(fz_context *ctx, dvi_resmanager *rm,
+   return rm->hooks.open_file(ctx, rm->hooks.env, kind, path);
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// WASM: there is no pdftex.map made by updmap. When a font is not in the
++// map, host_tl_font_maps (extension/engine/texlive.js) gives the names of the
++// map files of the TeX Live packages of that font (one per line, 0: none
++// new); they are added to the map.
++extern int host_tl_font_maps(const char *font, char *out, int cap);
++static char *extra_maps[128];
++static int extra_map_count;
++#endif
++
+ static void load_fontmap(fz_context *ctx, dvi_resmanager *rm)
+ {
+   if (rm->map)
+@@ -461,20 +482,32 @@ static void load_fontmap(fz_context *ctx, dvi_resmanager *rm)
+     rm->map = NULL;
+   }
+ 
+-  fz_stream *stm[3];
++#ifdef __EMSCRIPTEN__
++  enum { MAX_STM = 3 + 128 };
++#else
++  enum { MAX_STM = 3 };
++#endif
++  fz_stream *stm[MAX_STM];
++  int count = 3;
++  for (int i = 0; i < MAX_STM; ++i)
++    stm[i] = NULL;
+   fz_var(stm);
+   fz_try(ctx)
+   {
+     stm[0] = dvi_resmanager_open_file(ctx, rm, RES_MAP, "pdftex.map");
+     stm[1] = dvi_resmanager_open_file(ctx, rm, RES_MAP, "kanjix.map");
+     stm[2] = dvi_resmanager_open_file(ctx, rm, RES_MAP, "ckx.map");
++#ifdef __EMSCRIPTEN__
++    for (int i = 0; i < extra_map_count; ++i)
++      stm[count++] = dvi_resmanager_open_file(ctx, rm, RES_MAP, extra_maps[i]);
++#endif
+ 
+     // printf(stm ? "FONT: loading fontmap\n" : "FONT: no fontmap\n");
+-    rm->map = tex_fontmap_load(ctx, stm, 3);
++    rm->map = tex_fontmap_load(ctx, stm, count);
+   }
+   fz_always(ctx)
+   {
+-    for (int i = 0; i < 3; ++i)
++    for (int i = 0; i < count; ++i)
+       if (stm[i])
+         fz_drop_stream(ctx, stm[i]);
+   }
+@@ -673,6 +706,37 @@ dvi_font *dvi_resmanager_get_tex_font(fz_context *ctx, dvi_resmanager *rm, const
+   rm->first_dvi_font = cell;
+ 
+   tex_fontmap_entry *e = tex_fontmap_lookup(rm->map, cell->font.name);
++#ifdef __EMSCRIPTEN__
++  if (!e)
++  {
++    char names[4096];
++    int n = host_tl_font_maps(cell->font.name, names, sizeof(names));
++    bool added = false;
++    for (char *p = names, *end = names + (n > 0 ? n : 0); n > 0 && p < end; )
++    {
++      char *nl = memchr(p, '\n', end - p);
++      if (nl) *nl = 0;
++      if (*p && extra_map_count < 128)
++      {
++        bool known = false;
++        for (int i = 0; i < extra_map_count; ++i)
++          if (strcmp(extra_maps[i], p) == 0) known = true;
++        if (!known)
++        {
++          extra_maps[extra_map_count++] = strdup(p);
++          added = true;
++        }
++      }
++      if (!nl) break;
++      p = nl + 1;
++    }
++    if (added)
++    {
++      load_fontmap(ctx, rm);
++      e = tex_fontmap_lookup(rm->map, cell->font.name);
++    }
++  }
++#endif
+ 
+   if (e && e->font_file_name)
+   {
+diff --git a/src/dvi/tex_fontmap.c b/src/dvi/tex_fontmap.c
+index d48030f..adb52f2 100644
+--- a/src/dvi/tex_fontmap.c
++++ b/src/dvi/tex_fontmap.c
+@@ -210,6 +210,10 @@ seek_next_line:
+ 
+     if (count + count / 4 > capacity)
+       capacity *= 2;
++    // No entries (no map file found): one empty slot, so that lookups stop
++    // at once (a table of size 0 with mask -1 reads outside the table).
++    if (capacity == 0)
++      capacity = 1;
+ 
+     tex_fontmap_entry *hashtable =
+       fz_malloc_struct_array(ctx, capacity, tex_fontmap_entry);
 diff --git a/src/engine/main/fork.c b/src/engine/main/fork.c
 index d5b5013..e85632d 100644
 --- a/src/engine/main/fork.c
