@@ -40,7 +40,6 @@ class TexLive {
     this.loaded = new Set();     // packages in this.files
     this.cached = new Map();     // package -> File (in OPFS)
     this.written = new WeakMap();// module FS -> Set of paths written
-    this.askedFonts = new Set();
     this.stats = { downloads: 0, downloadBytes: 0, fromCache: 0, ms: 0 };
   }
 
@@ -208,8 +207,8 @@ class TexLive {
 
   // the map files for a font that is not in the map (see dvi_resmanager.c)
   fontMaps(font) {
-    if (this.askedFonts.has(font)) return '';
-    this.askedFonts.add(font);
+    // no memory of earlier questions here: each new driver (a new start of
+    // the engine) starts with no maps and must get them again
     const pkgs = new Set();
     for (const ext of ['.tfm', '.pfb', '.otf', '.ttf', '.vf'])
       for (const rel of this.byBase.get(font + ext) || []) pkgs.add(this.owner.get(rel));
