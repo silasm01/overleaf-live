@@ -1,4 +1,4 @@
-From ee09b4388063ee9ffe0fb98a24f8db8aebe94f68 Mon Sep 17 00:00:00 2001
+From 9073e06202e65a6bad5833615dff101fba21230d Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -17,10 +17,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  73 ++-
  src/frontend/editor.h             |  23 +
  src/frontend/engine_tex.c         |  71 +++
- src/frontend/main.c               | 333 +++++++++++++
- src/frontend/synctex.c            | 769 ++++++++++++++++++++++++++++++
- src/frontend/synctex.h            |  22 +
- 14 files changed, 1478 insertions(+), 57 deletions(-)
+ src/frontend/main.c               | 350 ++++++++++++
+ src/frontend/synctex.c            | 898 ++++++++++++++++++++++++++++++
+ src/frontend/synctex.h            |  24 +
+ 14 files changed, 1626 insertions(+), 57 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -818,10 +818,10 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..eb14d9e 100644
+index c202294..9b90b75 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,153 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,170 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -867,7 +867,8 @@ index c202294..eb14d9e 100644
 +      float x0 = p.x, x1 = p.x + w.x;
 +      if (x1 < x0) { float t = x0; x0 = x1; x1 = t; }
 +      dev->g[dev->n++] = (synctex_glyph){
-+        (int)(x0 * dev->inv), (int)(x1 * dev->inv), (int)(p.y * dev->inv)};
++        (int)(x0 * dev->inv), (int)(x1 * dev->inv), (int)(p.y * dev->inv),
++        it->gid, fz_keep_font(ctx, span->font)};
 +    }
 +  }
 +}
@@ -898,7 +899,13 @@ index c202294..eb14d9e 100644
 +  }
 +  fz_always(ctx)
 +  {
-+    if (dev) { fz_free(ctx, dev->g); fz_drop_device(ctx, &dev->super); }
++    if (dev)
++    {
++      if (dev->g)   /* not handed out: an error */
++        for (int i = 0; i < dev->n; i++) fz_drop_font(ctx, dev->g[i].font);
++      fz_free(ctx, dev->g);
++      fz_drop_device(ctx, &dev->super);
++    }
 +    fz_drop_display_list(ctx, dl);
 +  }
 +  fz_catch(ctx)
@@ -932,7 +939,7 @@ index c202294..eb14d9e 100644
 +  char *in = fz_malloc(ctx, size + 1);
 +  size = (long)fread(in, 1, size, f);
 +  fclose(f);
-+  char *out = fz_malloc(ctx, size + 1);
++  int *out = fz_malloc(ctx, sizeof(int) * (size + 1));
 +  int first = caret_line > 2 ? caret_line - 2 : 1, last = caret_line + 2;
 +  long i = 0, n = 0;
 +  int line = 1, nl = 0;
@@ -943,8 +950,16 @@ index c202294..eb14d9e 100644
 +    src->offsets[nl++] = (int)n;
 +    while (i < size && in[i] != '\n')
 +    {
-+      if (in[i] != '\r') out[n++] = in[i];
++      /* one entry per character (UTF-8 decoded), as SyncTeX counts */
++      unsigned char b = (unsigned char)in[i];
++      int cp = b, more = 0;
++      if (b >= 0xF0) { cp = b & 0x07; more = 3; }
++      else if (b >= 0xE0) { cp = b & 0x0F; more = 2; }
++      else if (b >= 0xC0) { cp = b & 0x1F; more = 1; }
 +      i++;
++      while (more-- > 0 && i < size && ((unsigned char)in[i] & 0xC0) == 0x80)
++        cp = (cp << 6) | (in[i++] & 0x3F);
++      if (cp != '\r') out[n++] = cp;
 +    }
 +    if (i >= size || line == last) break;
 +    i++;             /* the line break */
@@ -968,14 +983,16 @@ index c202294..eb14d9e 100644
 +  synctex_source src;
 +  caret_source(ps->ctx, ps->doc_path, &src);
 +  synctex_refine_target(ps->ctx, stx, buf, page, glyphs, ng, &src, rx, ry, rh, rd);
++  for (int i = 0; i < ng; i++)
++    fz_drop_font(ps->ctx, glyphs[i].font);
 +  fz_free(ps->ctx, glyphs);
-+  fz_free(ps->ctx, (char *)src.text);
++  fz_free(ps->ctx, (int *)src.text);
 +}
 +
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1064,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1081,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1101,7 +1118,7 @@ index c202294..eb14d9e 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1084,11 +1350,32 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +1367,32 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -1134,7 +1151,7 @@ index c202294..eb14d9e 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1421,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1438,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1168,7 +1185,7 @@ index c202294..eb14d9e 100644
    }
  }
  
-@@ -1353,6 +1667,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +1684,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -1183,7 +1200,7 @@ index c202294..eb14d9e 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +1727,16 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +1744,16 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -1200,7 +1217,7 @@ index c202294..eb14d9e 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2012,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2029,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -1209,7 +1226,7 @@ index c202294..eb14d9e 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..4192840 100644
+index 3f0b8f5..80aacae 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -1254,7 +1271,7 @@ index 3f0b8f5..4192840 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +928,758 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +928,887 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -1426,133 +1443,7 @@ index 3f0b8f5..4192840 100644
 +  }
 +}
 +
-+/* ---------------- forward, with glyphs ----------------
-+
-+   Between the left and the right SyncTeX record (anchors), the source text
-+   is cut into units: a visible character (one glyph), a space, markup that
-+   makes no glyph (\textbf{, }, ...), and "unknown" parts (math, \ref{...},
-+   other commands) that make some glyphs. The glyphs between the anchors
-+   (on one line, or to the end of a line and from the start of the next) are
-+   given to the characters before the first unknown part from the left, and
-+   to those after the last one from the right; the rest is shared in
-+   proportion to the columns. */
-+
-+enum { U_CHAR, U_SPACE, U_ZERO, U_UNKNOWN };
-+struct unit { int c0, c1, kind; };
-+
-+static int is_letter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
-+
-+static int name_in(const char *name, int len, const char *const *list)
-+{
-+  for (int i = 0; list[i]; i++)
-+    if ((int)strlen(list[i]) == len && memcmp(list[i], name, len) == 0)
-+      return 1;
-+  return 0;
-+}
-+
-+/* markup: the command and its braces make no glyph, the text inside does */
-+static const char *const markup_cmds[] = {
-+  "textbf", "textit", "textsl", "textsf", "textrm", "texttt", "textup",
-+  "textsc", "textmd", "textnormal", "emph", "underline", "mbox", "text",
-+  "bfseries", "itshape", "slshape", "sffamily", "rmfamily", "ttfamily",
-+  "scshape", "upshape", "mdseries", "normalfont", "em", "bf", "it", "tt",
-+  "sf", "rm", "sc", "small", "footnotesize", "scriptsize", "tiny", "large",
-+  "Large", "LARGE", "huge", "Huge", "normalsize", "noindent", "par",
-+  "label", "index", "hspace", "vspace", "phantom", "relax", NULL
-+};
-+/* commands whose arguments are not printed as such (one unknown part) */
-+static const char *const hidden_arg_cmds[] = {
-+  "label", "index", "hspace", "vspace", "phantom", NULL
-+};
-+
-+static int skip_group(const char *s, int n, int i, char open, char close)
-+{
-+  /* s[i] == open: index after the matching close */
-+  int depth = 0;
-+  for (; i < n; i++)
-+  {
-+    if (s[i] == '\\' && i + 1 < n) { i++; continue; }
-+    if (s[i] == open) depth++;
-+    else if (s[i] == close && --depth == 0) return i + 1;
-+  }
-+  return n;
-+}
-+
-+static int cut_units(const char *s, int n, struct unit *u, int cap)
-+{
-+  int k = 0, i = 0;
-+#define ADD(a, b, t) do { if (k < cap) { u[k].c0 = (a); u[k].c1 = (b); u[k].kind = (t); k++; } } while (0)
-+  while (i < n)
-+  {
-+    char c = s[i];
-+    if (c == '%')
-+    {
-+      /* a comment, and its line break: no space */
-+      int j = i;
-+      while (j < n && s[j] != '\n') j++;
-+      if (j < n) j++;
-+      ADD(i, j, U_ZERO); i = j; continue;
-+    }
-+    if (c == ' ' || c == '\t' || c == '~' || c == '\n' || c == '\r')
-+    { ADD(i, i + 1, U_SPACE); i++; continue; }
-+    if (c == '{' || c == '}')
-+    { ADD(i, i + 1, U_ZERO); i++; continue; }
-+    if (c == '$')
-+    {
-+      int dbl = (i + 1 < n && s[i + 1] == '$');
-+      int j = i + (dbl ? 2 : 1);
-+      while (j < n && !(s[j] == '$' && s[j - 1] != '\\')) j++;
-+      j += dbl ? 2 : 1;
-+      if (j > n) j = n;
-+      ADD(i, j, U_UNKNOWN); i = j; continue;
-+    }
-+    if (c == '\\' && i + 1 < n)
-+    {
-+      char d = s[i + 1];
-+      if (d == '(' || d == '[')
-+      {
-+        char e = (d == '(') ? ')' : ']';
-+        int j = i + 2;
-+        while (j + 1 < n && !(s[j] == '\\' && s[j + 1] == e)) j++;
-+        j = (j + 1 < n) ? j + 2 : n;
-+        ADD(i, j, U_UNKNOWN); i = j; continue;
-+      }
-+      if (!is_letter(d))
-+      {
-+        /* \%, \&, \_, \#, \$, \{, \}: one glyph; \\, \,, \ : no glyph */
-+        int kind = strchr("%&_#${}", d) ? U_CHAR : (d == ' ' ? U_SPACE : U_ZERO);
-+        ADD(i, i + 2, kind); i += 2; continue;
-+      }
-+      int j = i + 1;
-+      while (j < n && is_letter(s[j])) j++;
-+      const char *name = s + i + 1;
-+      int len = j - (i + 1);
-+      if (name_in(name, len, markup_cmds) && !name_in(name, len, hidden_arg_cmds))
-+      {
-+        while (j < n && s[j] == ' ') j++;   /* the space after a name is eaten */
-+        ADD(i, j, U_ZERO); i = j; continue;
-+      }
-+      /* the command with its [..] and {..} arguments */
-+      int hidden = name_in(name, len, hidden_arg_cmds);
-+      for (;;)
-+      {
-+        if (j < n && s[j] == '*') { j++; continue; }
-+        if (j < n && s[j] == '[') { j = skip_group(s, n, j, '[', ']'); continue; }
-+        if (j < n && s[j] == '{') { j = skip_group(s, n, j, '{', '}'); continue; }
-+        break;
-+      }
-+      ADD(i, j, hidden ? U_ZERO : U_UNKNOWN); i = j; continue;
-+    }
-+    /* a visible character; -- and --- are one glyph, a UTF-8 sequence too */
-+    int j = i + 1;
-+    if (c == '-' && j < n && s[j] == '-') { j++; if (j < n && s[j] == '-') j++; }
-+    else if ((c == '`' || c == '\'') && j < n && s[j] == c) j++;
-+    else if ((unsigned char)c >= 0xC0) while (j < n && ((unsigned char)s[j] & 0xC0) == 0x80) j++;
-+    ADD(i, j, U_CHAR); i = j;
-+  }
-+#undef ADD
-+  return k;
-+}
++/* ---------------- forward, with glyphs ---------------- */
 +
 +/* the lines of the page (hboxes in a vbox) and the interword glue records
 +   of the target source line */
@@ -1588,13 +1479,44 @@ index 3f0b8f5..4192840 100644
 +  }
 +}
 +
-+struct sglyph { int x0, x1, line; };
++struct sglyph { int x0, x1, line, index, y, box_of_seg; };
++/* a line of glyphs: its box, baseline, height and depth */
++struct seg { int box, y, y0, h, d, tall; };
++enum { MAXS = 4096 };
++static struct seg segs[MAXS];
++static int nsegs;
 +
 +static int cmp_sglyph(const void *a, const void *b)
 +{
 +  const struct sglyph *ga = a, *gb = b;
 +  if (ga->line != gb->line) return (ga->line > gb->line) - (ga->line < gb->line);
 +  return (ga->x0 > gb->x0) - (ga->x0 < gb->x0);
++}
++
++static int cmp_sglyph_box_y(const void *a, const void *b)
++{
++  const struct sglyph *ga = a, *gb = b;
++  if (ga->line != gb->line) return (ga->line > gb->line) - (ga->line < gb->line);
++  if (ga->y != gb->y) return (ga->y > gb->y) - (ga->y < gb->y);
++  return (ga->x0 > gb->x0) - (ga->x0 < gb->x0);
++}
++
++static int line_of_point(const struct line_box *lines, int nlines, int x, int y, int slack);
++
++/* the line of glyphs of a point: in its box, the line with the nearest
++   baseline */
++static int seg_of_point(const struct line_box *lines, int nlines, int x, int y, int slack)
++{
++  int b = line_of_point(lines, nlines, x, y, slack);
++  if (b < 0) return -1;
++  int best = -1, bestd = 0;
++  for (int k = 0; k < nsegs; k++)
++    if (segs[k].box == b)
++    {
++      int d = abs(segs[k].y - y);
++      if (best < 0 || d < bestd) { best = k; bestd = d; }
++    }
++  return best;
 +}
 +
 +static int line_contains(const struct line_box *l, int x, int y, int slack)
@@ -1616,11 +1538,151 @@ index 3f0b8f5..4192840 100644
 +  return best;
 +}
 +
++/* What the source says at each character: a character that may make a glyph
++   (CAND), a space (SPACE: no glyph, the end of a word), or something that
++   makes no glyph of its own (OTHER: a command name, braces, a comment). */
++enum { CH_OTHER, CH_SPACE, CH_CAND };
++
++static int is_letter_cp(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
++
++/* commands whose first braced argument is a name and not printed text */
++static int is_markup_arg_cmd(const int *s, int len)
++{
++  static const char *names[] = {
++    "begin", "end", "label", "ref", "eqref", "cref", "Cref", "autoref", "pageref",
++    "nameref", "cite", "citep", "citet", "parencite", "textcite", "autocite",
++    "input", "include", "includegraphics", "usepackage", "RequirePackage",
++    "documentclass", "newcommand", "renewcommand", "providecommand",
++    "newenvironment", "renewenvironment", "setlength", "addtolength",
++    "href", "color", "textcolor", "pagestyle",
++    "thispagestyle", "bibliography", "bibliographystyle", "addbibresource",
++    "vspace", "hspace", "setcounter", "addtocounter", NULL };
++  for (int k = 0; names[k]; k++)
++  {
++    int l = (int)strlen(names[k]);
++    if (l != len) continue;
++    int i = 0;
++    while (i < l && s[i] == (unsigned char)names[k][i]) i++;
++    if (i == l) return 1;
++  }
++  return 0;
++}
++
++static void classify_source(const int *s, int n, unsigned char *k)
++{
++  int i = 0;
++  while (i < n)
++  {
++    int c = s[i];
++    if (c == '%')
++    {
++      /* a comment, and its line break: no space */
++      while (i < n && s[i] != '\n') k[i++] = CH_OTHER;
++      if (i < n) k[i++] = CH_OTHER;
++      continue;
++    }
++    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '~')
++    { k[i++] = CH_SPACE; continue; }
++    if (c == '\\' && i + 1 < n)
++    {
++      int d = s[i + 1];
++      if (is_letter_cp(d))
++      {
++        int j = i + 1;
++        while (j < n && is_letter_cp(s[j])) j++;
++        int verb = (j - i - 1 == 4 && s[i + 1] == 'v' && s[i + 2] == 'e' &&
++                    s[i + 3] == 'r' && s[i + 4] == 'b');
++        int argcmd = is_markup_arg_cmd(s + i + 1, j - i - 1);
++        while (i < j) k[i++] = CH_OTHER;
++        if (argcmd)
++        {
++          /* \begin{name}, \ref{key}, ...: the argument is not printed */
++          int m = i;
++          while (m < n && (s[m] == ' ' || s[m] == '*')) m++;
++          if (m < n && s[m] == '[')
++          {
++            while (m < n && s[m] != ']' && s[m] != '\n') m++;
++            if (m < n && s[m] == ']') m++;
++          }
++          if (m < n && s[m] == '{')
++          {
++            int depth = 0;
++            while (m < n)
++            {
++              if (s[m] == '{') depth++;
++              else if (s[m] == '}' && --depth == 0) { m++; break; }
++              else if (s[m] == '\n') break;
++              m++;
++            }
++            while (i < m) k[i++] = CH_OTHER;
++          }
++        }
++        if (verb && i < n)
++        {
++          /* \verb|...|: the text between the delimiters is printed */
++          int delim = s[i];
++          k[i++] = CH_OTHER;
++          while (i < n && s[i] != delim && s[i] != '\n')
++            k[i] = (s[i] == ' ') ? CH_SPACE : CH_CAND, i++;
++          if (i < n && s[i] == delim) k[i++] = CH_OTHER;
++        }
++        continue;
++      }
++      /* \%, \&, \_, \#, \$: the character; \\, \,, \( ... : nothing */
++      k[i] = CH_OTHER;
++      k[i + 1] = (d == '%' || d == '&' || d == '_' || d == '#' || d == '$' ||
++                  d == '{' || d == '}') ? CH_CAND : (d == ' ' ? CH_SPACE : CH_OTHER);
++      i += 2;
++      continue;
++    }
++    if (c == '{' || c == '}' || c == '$' || c == '^' || c == '_' || c == '&' || c == '#')
++    { k[i++] = CH_OTHER; continue; }
++    k[i++] = CH_CAND;
++  }
++}
++
++/* Does source character u make glyph g? (also the TeX ligatures) */
++static int glyph_matches(fz_context *ctx, const synctex_glyph *g, int u)
++{
++  if (!g->font)
++    return 0;
++  static const int alt[][4] = {
++    /* source -> other characters the font may show for it */
++    {'f', 0xFB00, 0xFB01, 0xFB02}, {'f', 0xFB03, 0xFB04, 0},
++    {'-', 0x2013, 0x2014, 0x2010}, {'-', 0x2212, 0, 0},
++    {'`', 0x2018, 0x201C, 0}, {'\'', 0x2019, 0x201D, 0},
++    {'"', 0x201C, 0x201D, 0},
++  };
++  int gid = fz_encode_character(ctx, g->font, u);
++  if (gid > 0 && gid == g->gid)
++    return 1;
++  for (unsigned i = 0; i < sizeof(alt) / sizeof(alt[0]); i++)
++    if (alt[i][0] == u)
++      for (int j = 1; j < 4 && alt[i][j]; j++)
++      {
++        gid = fz_encode_character(ctx, g->font, alt[i][j]);
++        if (gid > 0 && gid == g->gid)
++          return 1;
++      }
++  return 0;
++}
++
++/* Markup (command names, braces, comments) is printed only as code: in a
++   listing or \verb, in a typewriter font */
++static int match_ok(fz_context *ctx, const synctex_glyph *g, int u, int weight)
++{
++  if (weight < 2 && !(g->font && fz_font_is_monospaced(ctx, g->font)))
++    return 0;
++  return glyph_matches(ctx, g, u);
++}
++
 +/* The caret with glyphs: the glyphs of the page in reading order (line by
-+   line), anchored at interword spaces of the source line (glue records whose
-+   source character before is a space). Characters after the left anchor
-+   take the next glyphs, characters before the right anchor the glyphs before
-+   it, across line breaks. Returns 0 if it can't (then the caller keeps the
++   line), anchored at interword spaces of the source window (glue/kern
++   records whose source character before is a space). Between the anchors,
++   the source characters are aligned with the glyphs by character (the
++   longest common subsequence, with the fonts' character maps). A character
++   with a glyph gets its left edge; the others go between their neighbours
++   with glyphs. Returns 0 if it can't (then the caller keeps the
 +   interpolated point). */
 +static int refine_with_glyphs(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
 +                              int page, int tag, int line, int col,
@@ -1633,179 +1695,263 @@ index 3f0b8f5..4192840 100644
 +  int li = line - source->first_line;
 +  if (li < 0 || li >= source->nlines)
 +    return 0;
-+  const char *src = source->text;
++  const int *src = source->text;
 +  int srclen = source->len;
 +  int line_end = (li + 1 < source->nlines) ? source->offsets[li + 1] - 1 : srclen;
 +  int c = source->offsets[li] + col;
 +  if (c > line_end) c = line_end;
-+  enum { MAXL = 1024, MAXR = 1024, MAXU = 1024 };
++
++  enum { MAXL = 1024, MAXR = 1024 };
 +  static struct line_box lines[MAXL];
 +  static struct glue_rec glues[MAXR];
 +  struct glyph_env e = {tag, source->first_line, source->nlines, source->offsets,
 +                        lines, 0, MAXL, glues, 0, MAXR};
 +  walk_page(ctx, stx, buf, page, glyph_walk_fn, &e);
 +  int dbg = getenv("TXP_CARET_DEBUG") != NULL;
-+  if (dbg) fprintf(stderr, "[caret] tag %d line %d col %d: %d lines, %d glues, %d glyphs\n",
-+                   tag, line, c, e.nlines, e.nglues, nglyphs);
 +  if (e.nlines == 0)
 +    return 0;
 +  int slack = 65536;   /* 1pt in SyncTeX units (sp) */
 +
-+  /* the glyph stream */
++  unsigned char *kind = malloc(srclen + 1);
 +  struct sglyph *g = malloc(sizeof(*g) * nglyphs);
-+  if (!g) return 0;
++  int *order = NULL, *dp = NULL, *match = NULL;
++  if (!kind || !g) goto fail;
++  classify_source(src, srclen, kind);
++
++  /* the glyph stream. A glyph belongs to the smallest line box around it;
++     in a box, glyphs whose baselines are within 6pt make one line (a
++     superscript stays in its line, the rows of a table do not). Order:
++     box, line in the box (top down), x. g[i].line = index of that line in
++     segs[], g[i].index = index in glyphs[]. */
 +  int n = 0;
 +  for (int i = 0; i < nglyphs; i++)
 +  {
 +    int l = line_of_point(lines, e.nlines, (glyphs[i].x0 + glyphs[i].x1) / 2, glyphs[i].y, slack / 4);
 +    if (l >= 0)
-+      g[n++] = (struct sglyph){glyphs[i].x0, glyphs[i].x1, l};
++      g[n++] = (struct sglyph){glyphs[i].x0, glyphs[i].x1, l, i};
 +  }
++  /* by box, then baseline */
++  for (int i = 0; i < n; i++) g[i].y = glyphs[g[i].index].y;
++  qsort(g, n, sizeof(g[0]), cmp_sglyph_box_y);
++  nsegs = 0;
++  for (int i = 0; i < n; i++)
++  {
++    if (i == 0 || g[i].line != g[i - 1].box_of_seg ||
++        g[i].y - segs[nsegs - 1].y0 > 6 * slack)
++    {
++      if (nsegs == MAXS) { n = i; break; }
++      const struct line_box *b = &lines[g[i].line];
++      int tall = b->h + b->d > 30 * slack;
++      segs[nsegs] = (struct seg){g[i].line, g[i].y, g[i].y,
++                                 tall ? 8 * slack : b->h, tall ? 3 * slack : b->d, tall};
++      nsegs++;
++    }
++    struct seg *sg = &segs[nsegs - 1];
++    if (g[i].y < sg->y0) sg->y0 = g[i].y;
++    g[i].box_of_seg = g[i].line;
++    g[i].line = nsegs - 1;
++  }
++  /* the baseline of a line: the most common one (not a superscript) */
++  for (int k = 0; k < nsegs; k++)
++    if (!segs[k].tall) segs[k].y = lines[segs[k].box].y;
 +  qsort(g, n, sizeof(g[0]), cmp_sglyph);
 +
-+  /* anchors: (column of a word start, index of its first glyph) */
++  /* anchors: (character offset of a word start, index of its first glyph) */
 +  int aL = -1, pL = -1, aR = -1, pR = -1;
 +  for (int k = 0; k < e.nglues; k++)
 +  {
 +    int a = glues[k].a;
-+    if (a <= 0 || a > srclen ||
-+        !(src[a - 1] == ' ' || src[a - 1] == '~' || src[a - 1] == '\n'))
++    /* a word starts there: after a space, a visible character or a
++       command name (not &, {, $, \( ...) */
++    if (a <= 0 || a >= srclen || kind[a - 1] != CH_SPACE || kind[a] == CH_SPACE)
 +      continue;
-+    if (a < srclen && (src[a] == ' ' || src[a] == '~' || src[a] == '\n'))
++    if (kind[a] == CH_OTHER &&
++        !(src[a] == '\\' && a + 1 < srclen && is_letter_cp(src[a + 1])))
 +      continue;
-+    int l = line_of_point(lines, e.nlines, glues[k].x, glues[k].y, slack);
++    int l = seg_of_point(lines, e.nlines, glues[k].x, glues[k].y, slack);
 +    if (l < 0) continue;
 +    int p = 0;
 +    while (p < n && (g[p].line < l || (g[p].line == l && (g[p].x0 + g[p].x1) / 2 < glues[k].x)))
 +      p++;
-+    /* several records with the same column (e.g. after a group): the last
-+       one in reading order is at the word */
++    /* several records with the same character: the last one in reading
++       order is at the word */
 +    if (a <= c && (a > aL || (a == aL && p > pL))) { aL = a; pL = p; }
 +    if (a > c && (aR < 0 || a < aR || (a == aR && p > pR))) { aR = a; pR = p; }
 +  }
++  /* anchors must agree with each other and be near the line that SyncTeX
++     found (the interpolated point *x, *y) */
++  int l0 = seg_of_point(lines, e.nlines, *x, *y, slack);
++  #define GLINE(p) ((p) < n ? g[p].line : (n > 0 ? g[n - 1].line : -1))
++  if (aL >= 0 && aR >= 0 && pR < pL) { aL = aR = -1; }
++  if (l0 >= 0 && aL >= 0 && abs(GLINE(pL) - l0) > 2) aL = -1;
++  if (l0 >= 0 && aR >= 0 && abs(GLINE(pR > 0 ? pR - 1 : 0) - l0) > 2) aR = -1;
++  /* the part of the source and of the stream to align: with one anchor,
++     the stream from (or up to) the line next to it */
++  int s0 = aL >= 0 ? aL : 0, s1 = aR >= 0 ? aR : srclen;
++  int span = s1 - s0;
++  int q0, q1;
++  if (aL >= 0) q0 = pL;
++  else if (aR >= 0)
++  {
++    int lr = GLINE(pR > 0 ? pR - 1 : 0) - 1;
++    q0 = pR;
++    while (q0 > 0 && g[q0 - 1].line >= lr) q0--;
++  }
++  else q0 = -1;
++  if (aR >= 0) q1 = pR;
++  else if (aL >= 0)
++  {
++    int ll = GLINE(pL) + 1;
++    q1 = pL;
++    while (q1 < n && g[q1].line <= ll) q1++;
++  }
++  else q1 = -1;
++  #undef GLINE
++  if (q0 < 0) q0 = 0;
++  if (q1 > n) q1 = n;
++  if (dbg)
++    fprintf(stderr, "[caret] line %d col %d: c %d, anchors %d@%d %d@%d, stream %d..%d\n",
++            line, col, c, aL, pL, aR, pR, q0, q1);
++  if (aL < 0 && aR < 0)
++  {
++    /* no interword records (e.g. a listing): the line of the interpolated
++       point, and the lines before and after it, against the source line */
++    if (l0 < 0) goto fail;
++    s0 = source->offsets[li];
++    s1 = line_end;
++    span = s1 - s0;
++    q0 = 0;
++    while (q0 < n && g[q0].line < l0 - 1) q0++;
++    q1 = q0;
++    while (q1 < n && g[q1].line <= l0 + 1) q1++;
++    if (dbg)
++      fprintf(stderr, "[caret] no anchors: line box %d, source %d..%d, stream %d..%d\n",
++              l0, s0, s1, q0, q1);
++  }
++  if (q1 <= q0 || span <= 0 || span > 2000 || q1 - q0 > 4000)
++    goto fail;
++
++  /* longest common subsequence of the candidate characters and the glyphs */
++  /* every character that is not a space may make a glyph: text with weight
++     2, markup (command names, braces, comments) with weight 1, so that it
++     matches only where it is printed (a listing, \verb) */
++  int ns = 0;
++  order = malloc(sizeof(int) * (span + 1));
++  for (int i = s0; i < s1; i++) if (kind[i] != CH_SPACE) order[ns++] = i;
++  int ng = q1 - q0;
++  /* best[i][j]: best score of the first i characters and j glyphs;
++     run[i][j]: the same with character i-1 on glyph j-1. A match scores
++     its weight, and 1 more when it continues a match of the character
++     before it in the source on the glyph before it (text is contiguous). */
++  long cells = (long)(ns + 1) * (ng + 1);
++  dp = malloc(sizeof(int) * cells * 2);
++  match = malloc(sizeof(int) * (srclen + 1));
++  if (!order || !dp || !match) goto fail;
++  int *run = dp + cells;
++  #define BEST(i, j) dp[(long)(i) * (ng + 1) + (j)]
++  #define RUN(i, j) run[(long)(i) * (ng + 1) + (j)]
++  enum { NONE = -1000000 };
++  for (int i = 0; i <= ns; i++)
++    for (int j = 0; j <= ng; j++)
++    {
++      if (i == 0 || j == 0) { BEST(i, j) = 0; RUN(i, j) = NONE; continue; }
++      int w = kind[order[i - 1]] == CH_CAND ? 2 : 1;
++      int r = NONE;
++      if (match_ok(ctx, &glyphs[g[q0 + j - 1].index], src[order[i - 1]], w))
++      {
++        r = BEST(i - 1, j - 1) + w;
++        if (i > 1 && order[i - 2] == order[i - 1] - 1 && RUN(i - 1, j - 1) > NONE &&
++            RUN(i - 1, j - 1) + w + 1 > r)
++          r = RUN(i - 1, j - 1) + w + 1;
++      }
++      RUN(i, j) = r;
++      int b = BEST(i - 1, j) > BEST(i, j - 1) ? BEST(i - 1, j) : BEST(i, j - 1);
++      BEST(i, j) = r > b ? r : b;
++    }
++  for (int i = 0; i < srclen; i++) match[i] = -1;
++  {
++    int i = ns, j = ng, in_run = 0;
++    while (i > 0 && j > 0)
++    {
++      if (!in_run)
++      {
++        if (BEST(i, j) == BEST(i - 1, j)) { i--; continue; }
++        if (BEST(i, j) == BEST(i, j - 1)) { j--; continue; }
++        in_run = 1;    /* BEST(i, j) == RUN(i, j) */
++      }
++      /* character i-1 on glyph j-1 */
++      match[order[i - 1]] = q0 + j - 1;
++      int w = kind[order[i - 1]] == CH_CAND ? 2 : 1;
++      in_run = (i > 1 && order[i - 2] == order[i - 1] - 1 && RUN(i - 1, j - 1) > NONE &&
++                RUN(i, j) == RUN(i - 1, j - 1) + w + 1);
++      i--; j--;
++    }
++  }
++  #undef BEST
++  #undef RUN
 +  if (dbg)
 +  {
-+    fprintf(stderr, "[caret] stream %d glyphs; anchors aL %d pL %d aR %d pR %d\n", n, aL, pL, aR, pR);
-+    for (int k = 0; k < e.nglues; k++) fprintf(stderr, "   glue a=%d x=%d y=%d\n", glues[k].a, glues[k].x, glues[k].y);
++    fprintf(stderr, "   ns %d ng %d best %d; source:", ns, ng, dp[(long)ns * (ng + 1) + ng]);
++    for (int i = s0; i < s1 && i < s0 + 60; i++) fputc(src[i] < 128 ? src[i] : '?', stderr);
++    fprintf(stderr, "\n");
++    for (int i = s0; i < s1; i++)
++      if (match[i] >= 0)
++        fprintf(stderr, "   src %d '%c' -> glyph %d line %d x %d\n", i,
++                src[i] < 128 ? src[i] : '?', match[i], g[match[i]].line, g[match[i]].x0);
++    for (int j = q0; j < q1 && j < q0 + 400; j += 1)
++      if (j == q0 || g[j].line != g[j - 1].line)
++        fprintf(stderr, "   stream %d starts line %d (y %d)\n", j, g[j].line, segs[g[j].line].y);
 +  }
-+  if (aL >= 0 && aR >= 0 && pR < pL) { free(g); return 0; }
++  /* the anchors themselves: the word start is at the anchor's glyph */
++  if (aR >= 0 && pR < n && match[aR] < 0 && kind[aR] == CH_CAND) match[aR] = pR;
 +
-+  /* the units of the source between the anchors */
-+  static struct unit all[MAXU];
-+  int nu_all = cut_units(src, srclen, all, MAXU);
-+  int from = aL >= 0 ? aL : 0, to = aR >= 0 ? aR : srclen;
-+  int k0 = 0;
-+  while (k0 < nu_all && all[k0].c1 <= from) k0++;
-+  int k1 = k0;
-+  while (k1 < nu_all && all[k1].c0 < to) k1++;
-+  struct unit *u = all + k0;
-+  int nu = k1 - k0;
-+  if (nu <= 0 || (aL < 0 && aR < 0)) { free(g); return 0; }
-+
-+  int first_unknown = -1, last_unknown = -1, nchars = 0;
-+  for (int i = 0; i < nu; i++)
-+  {
-+    if (u[i].kind == U_UNKNOWN) { if (first_unknown < 0) first_unknown = i; last_unknown = i; }
-+    if (u[i].kind == U_CHAR) nchars++;
-+  }
-+  static int gi[MAXU];
-+  for (int i = 0; i < nu; i++) gi[i] = -1;
-+  int left = 0, right = 0;
-+  /* from the left anchor forward, up to the first unknown part */
-+  if (aL >= 0)
-+  {
-+    int lend = first_unknown < 0 ? nu : first_unknown;
-+    for (int i = 0; i < lend; i++) if (u[i].kind == U_CHAR) gi[i] = pL + left++;
-+  }
-+  /* from the right anchor backward, down to the last unknown part */
-+  if (aR >= 0)
-+  {
-+    int rstart = last_unknown < 0 ? (aL >= 0 ? nu : -1) : last_unknown;
-+    for (int i = nu - 1; i > rstart; i--) if (u[i].kind == U_CHAR) gi[i] = pR - 1 - right++;
-+    if (aL < 0 && last_unknown < 0)
-+      for (int i = nu - 1; i >= 0; i--) if (u[i].kind == U_CHAR && gi[i] < 0) gi[i] = pR - 1 - right++;
-+  }
-+  int span0 = aL >= 0 ? pL : -1, span1 = aR >= 0 ? pR : -1;
-+  int bad = 0;
-+  if (span0 >= 0 && span1 >= 0)
-+  {
-+    /* both sides: the glyphs must be enough, and exactly enough without
-+       unknown parts (else a ligature or a hyphen: share in proportion) */
-+    if (left + right > span1 - span0) bad = 1;
-+    if (first_unknown < 0 && nchars != span1 - span0) bad = 1;
-+  }
-+  for (int i = 0; i < nu; i++) if (gi[i] >= n || (gi[i] < 0 && gi[i] != -1)) bad = 1;
-+  if (bad && (span0 < 0 || span1 < 0)) { free(g); return 0; }
-+
-+  /* the point of glyph index p (fractional) */
-+  #define AT(f) do { double f_ = (f); if (f_ < 0) f_ = 0; \
-+      if (n == 0) goto fail; \
-+      if (f_ >= n) { gx = g[n - 1].x1; gl = g[n - 1].line; } \
-+      else { int i_ = (int)f_; double t_ = f_ - i_; \
-+             gx = g[i_].x0 + (int)(t_ * (g[i_].x1 - g[i_].x0)); gl = g[i_].line; } } while (0)
-+  int gx = 0, gl = 0;
-+  if (bad)
-+  {
-+    double f = span0 + (double)(c - aL) / (double)(aR - aL) * (span1 - span0);
-+    AT(f);
-+  }
++  int gx, gl;
++  if (c < s0 || c > s1) goto fail;
++  if (c < srclen && match[c] >= 0)
++  { gx = g[match[c]].x0; gl = g[match[c]].line; }
 +  else
 +  {
-+    int k = 0;
-+    while (k < nu && !(c >= u[k].c0 && c < u[k].c1)) k++;
-+    if (k == nu)
++    /* between the nearest characters with a glyph */
++    int b = c - 1, f = c + 1;
++    while (b >= s0 && match[b] < 0) b--;
++    while (f < s1 && match[f] < 0) f++;
++    if (f >= s1 && aR >= 0 && pR < n) f = -2;      /* the right anchor */
++    int gb = (b >= s0) ? match[b] : (aL >= 0 ? pL - 1 : -1);
++    int gf = (f >= 0 && f < s1) ? match[f] : (f == -2 ? pR : -1);
++    if (gb < 0 && gf < 0) goto fail;
++    /* glyphs between them that no source character took */
++    int free_glyphs = (gb >= 0 && gf >= 0) ? gf - gb - 1 : 0;
++    int space_before = 0;
++    for (int i = (b >= s0 ? b + 1 : s0); i < c; i++) if (kind[i] == CH_SPACE) space_before = 1;
++    if (free_glyphs > 0 && g[gb].line == g[gf].line)
 +    {
-+      /* at the right anchor (start of the next word) or the end */
-+      if (aR >= 0 && c >= aR) AT(pR);
-+      else
-+      {
-+        int last = -1;
-+        for (int i = nu - 1; i >= 0 && last < 0; i--) if (gi[i] >= 0) last = gi[i];
-+        if (last < 0) goto fail;
-+        gx = g[last].x1; gl = g[last].line;
-+      }
++      /* e.g. \ref{...}: the characters between share the glyphs between,
++         in proportion */
++      int cb = b >= s0 ? b : s0 - 1, cf = (f >= 0 && f < s1) ? f : s1;
++      int k = cf - cb - 1;
++      double fi = gb + 1 + (double)(c - cb - 1) * free_glyphs / (k > 0 ? k : 1);
++      int i_ = (int)fi;
++      if (i_ < gb + 1) i_ = gb + 1;
++      if (i_ > gf - 1) i_ = gf - 1;
++      double t_ = fi - i_;
++      if (t_ < 0) t_ = 0;
++      if (t_ > 1) t_ = 1;
++      gx = g[i_].x0 + (int)(t_ * (g[i_].x1 - g[i_].x0));
++      gl = g[i_].line;
 +    }
-+    else if (u[k].kind == U_CHAR && gi[k] >= 0)
-+      AT(gi[k]);
-+    else if (u[k].kind == U_SPACE || u[k].kind == U_ZERO)
-+    {
-+      int before = -1, after = -1;
-+      for (int i = k - 1; i >= 0 && before < 0; i--) if (gi[i] >= 0) before = gi[i];
-+      for (int i = k + 1; i < nu && after < 0; i++) if (gi[i] >= 0) after = gi[i];
-+      if (u[k].kind == U_ZERO && after >= 0 && (k == 0 || u[k - 1].kind != U_CHAR || before < 0))
-+        AT(after);
-+      else if (before >= 0)
-+      { gx = g[before].x1; gl = g[before].line; }
-+      else if (after >= 0)
-+        AT(after);
-+      else if (aR >= 0 && first_unknown < 0)
-+        AT(pR);
-+      else
-+        goto shared;
-+    }
++    else if (gb >= 0 && (!space_before || gf < 0 || (c < srclen && kind[c] == CH_SPACE)))
++    { gx = g[gb].x1; gl = g[gb].line; }
 +    else
-+    {
-+    shared:;
-+      /* the part with unknown glyphs: the glyphs between what the two sides
-+         took, in proportion to the columns */
-+      if (first_unknown < 0) goto fail;
-+      int g0 = aL >= 0 ? pL + left : -1;
-+      int g1 = aR >= 0 ? pR - right : -1;
-+      if (g0 < 0 || g1 < 0 || g1 < g0) goto fail;
-+      int c0 = u[first_unknown].c0, c1 = u[last_unknown].c1;
-+      if (c1 <= c0) c1 = c0 + 1;
-+      AT(g0 + (double)(c - c0) / (double)(c1 - c0) * (g1 - g0));
-+    }
++    { gx = g[gf].x0; gl = g[gf].line; }
 +  }
-+  #undef AT
 +  *x = gx;
-+  *y = lines[gl].y;
-+  *h = lines[gl].h;
-+  *d = lines[gl].d;
-+  free(g);
++  *y = segs[gl].y;
++  *h = segs[gl].h;
++  *d = segs[gl].d;
++  free(kind); free(g); free(order); free(dp); free(match);
 +  return 1;
 +fail:
-+  free(g);
++  free(kind); free(g); free(order); free(dp); free(match);
 +  return 0;
 +}
 +
@@ -2014,10 +2160,18 @@ index 3f0b8f5..4192840 100644
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..df5423d 100644
+index cfff199..4023726 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
-@@ -42,6 +42,28 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -27,6 +27,7 @@
+ 
+ #include <mupdf/fitz/context.h>
+ #include <mupdf/fitz/buffer.h>
++#include <mupdf/fitz/font.h>
+ 
+ typedef struct synctex_s synctex_t;
+ 
+@@ -42,6 +43,29 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -2028,11 +2182,12 @@ index cfff199..df5423d 100644
 +   right edge and baseline. With them and the text of the source line, the
 +   caret goes to the glyph of each visible character; without them (NULL),
 +   it is interpolated between the SyncTeX records. */
-+typedef struct { int x0, x1, y; } synctex_glyph;
-+/* Some lines of the source around the target line, joined with '\n':
++typedef struct { int x0, x1, y, gid; fz_font *font; } synctex_glyph;
++/* Some lines of the source around the target line, joined with '\n', as
++   Unicode characters (SyncTeX and the editor count characters, not bytes):
 +   line first_line starts at offsets[0], ... */
 +typedef struct {
-+  const char *text;
++  const int *text;
 +  int len, first_line, nlines;
 +  int offsets[8];
 +} synctex_source;
