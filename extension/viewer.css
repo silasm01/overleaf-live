@@ -68,6 +68,15 @@
   font: 12px/1.4 system-ui, sans-serif !important; color: #333 !important;
 }
 .olive-menu-lua input { margin: 0 !important; }
+.olive-menu-lua:has(input:disabled) { color: #999 !important; cursor: default; }
+.olive-menu-engine {
+  display: flex !important; align-items: center; gap: 6px; margin: 0 0 8px !important;
+  font: 12px/1.4 system-ui, sans-serif !important; color: #333 !important;
+}
+.olive-menu-engine select {
+  font: 12px/1.4 system-ui, sans-serif !important; color: #333 !important; background: #fff !important;
+  border: 1px solid #bbb !important; border-radius: 4px !important; padding: 1px 4px !important; margin: 0 !important;
+}
 .olive-menu-buttons { display: flex; gap: 8px; justify-content: flex-end; }
 .olive-menu-buttons button {
   all: unset; box-sizing: border-box; cursor: pointer;

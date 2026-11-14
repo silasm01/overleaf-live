@@ -257,7 +257,7 @@ index 3096732..3d14cd4 100644
  txp_client *txp_connect(FILE *file)
  {
 diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
-index 5d275b2..1be1984 100644
+index 5d275b2..ea3d654 100644
 --- a/src/frontend/engine_tex.c
 +++ b/src/frontend/engine_tex.c
 @@ -137,6 +137,19 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q);
@@ -324,6 +324,28 @@ index 5d275b2..1be1984 100644
    return time > 500 + last_time;
  }
  
+@@ -1168,7 +1202,21 @@ static int compute_fences(fz_context *ctx, struct tex_engine *self, int trace, i
+   while (target_process >= 0 && self->processes[target_process].trace_len > trace)
+     target_process -= 1;
+   int target_trace = target_process >= 0 ? self->processes[target_process].trace_len : -1;
++#ifdef __EMSCRIPTEN__
++  // WASM: each fence is a snapshot (~50 ms, wasm/js/kernel.js): fewer fences
++  // (TXP_MAX_FENCES, default 4) than natively (16)
++  static int max_fences = -1;
++  if (max_fences < 0)
++  {
++    const char *e = getenv("TXP_MAX_FENCES");
++    max_fences = e ? atoi(e) : 4;
++    if (max_fences < 1) max_fences = 1;
++    if (max_fences > 16) max_fences = 16;
++  }
++  while (trace > target_trace && self->fence_pos < max_fences - 1)
++#else
+   while (trace > target_trace && self->fence_pos < 15)
++#endif
+   {
+     if (self->trace[trace].time <= time && possible_fence(&self->trace[trace]))
+     {
 diff --git a/src/frontend/main.c b/src/frontend/main.c
 index ae65882..5189755 100644
 --- a/src/frontend/main.c

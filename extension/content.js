@@ -36,6 +36,7 @@
   let caretTimer = null;
   let pendingGoto = null;        // reverse search waiting for a file to open
   let docId = null;              // the file open in the editor (Overleaf's id)
+  let engine = "browser";        // "browser" (WebAssembly) or "wsl" (the helper); for all projects
 
   // --- the viewer and the Live button ---------------------------------
   const ui = document.createElement("div");
@@ -48,7 +49,12 @@
       <div class="olive-menu" hidden>
         <div class="olive-menu-status"></div>
         <pre class="olive-menu-errors" hidden></pre>
-        <label class="olive-menu-lua" title="Runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust.">
+        <label class="olive-menu-engine" title="In the browser: TeXpresso runs as WebAssembly in Chrome, nothing to install. WSL helper: TeXpresso runs in WSL on your PC (start the helper there).">
+          Engine <select class="olive-engine">
+            <option value="browser">In the browser</option>
+            <option value="wsl">WSL helper</option>
+          </select></label>
+        <label class="olive-menu-lua" title="Runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust. Only with the WSL helper (for now).">
           <input type="checkbox" class="olive-lua"> Lua results (shell escape)</label>
         <div class="olive-menu-buttons">
           <button class="olive-sync" title="Send all project files again">Sync files</button>
@@ -79,7 +85,10 @@
     $(".olive-label").textContent = label;
     toggle.dataset.state = state;
     toggle.title = settings.on ? status.text : "Live preview by TeXpresso on your PC";
-    $(".olive-menu-status").textContent = connected ? status.text : "Helper not running (start it in WSL).";
+    $(".olive-menu-status").textContent = connected ? status.text
+      : engine === "wsl" ? "Helper not running (start it in WSL)." : "Engine not running.";
+    $(".olive-engine").value = engine;
+    $(".olive-lua").disabled = engine !== "wsl";
     const box = $(".olive-menu-errors");
     box.hidden = !errors.length;
     box.textContent = errors.map((l) => "! " + l).join("\n");
@@ -96,6 +105,10 @@
   });
   $(".olive-off").addEventListener("click", () => { menu.hidden = true; setOn(false); });
   $(".olive-sync").addEventListener("click", () => sync(true));
+  $(".olive-engine").addEventListener("change", (e) => {
+    engine = e.target.value === "wsl" ? "wsl" : "browser";
+    chrome.storage.local.set({ engine });     // storage.onChanged reconnects (all tabs)
+  });
   $(".olive-lua").addEventListener("change", (e) => {
     settings.lua = e.target.checked;
     save();
@@ -516,7 +529,7 @@
       port = null;
       return;
     }
-    setStatus("connecting to the helper…", true);
+    setStatus(engine === "wsl" ? "connecting to the helper…" : "starting the engine…", true);
     port.onMessage.addListener(onHelper);
     port.onDisconnect.addListener(() => {
       port = null;
@@ -551,7 +564,7 @@
         break;
       case "disconnected":
         connected = false;
-        setStatus("helper not running (start it in WSL)", false);
+        setStatus(engine === "wsl" ? "helper not running (start it in WSL)" : "engine not running", false);
         break;
       case "status":
         setStatus(msg.text, msg.busy);
@@ -717,6 +730,11 @@
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.engine) {
+      engine = changes.engine.newValue === "wsl" ? "wsl" : "browser";
+      if (settings.on) { disconnect(); connect(); }
+      showStatus();
+    }
     if (area !== "local" || !changes[settingsKey]) return;
     const next = changes[settingsKey].newValue || {};
     const turned = next.on !== settings.on;
@@ -726,7 +744,8 @@
     else if (luaChanged) $(".olive-lua").checked = settings.lua;
   });
 
-  chrome.storage.local.get(settingsKey, (r) => {
+  chrome.storage.local.get([settingsKey, "engine"], (r) => {
+    engine = r.engine === "wsl" ? "wsl" : "browser";
     settings = Object.assign(settings, r[settingsKey] || {});
     if (!settings.zoom || !settings.zoom.mode) settings.zoom = { mode: "page-width", scale: 1 };
     apply();

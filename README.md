@@ -1,7 +1,13 @@
 # Overleaf Live (prototype)
 
-Live preview for Overleaf. TeXpresso on your PC typesets the page while you
-type, and a Chrome extension shows the page over Overleaf's PDF pane.
+Live preview for Overleaf. TeXpresso typesets the page while you type, and a
+Chrome extension shows the page over Overleaf's PDF pane.
+
+There are two engines. You select one in the Live menu (**Engine**):
+- **In the browser** (default, since version 0.5.0): TeXpresso runs as
+  WebAssembly in Chrome. Nothing to install in WSL. See "Browser engine" below
+  for what it can not do yet.
+- **WSL helper**: TeXpresso runs in WSL on your PC (sections 1-4).
 
 ```
 Overleaf tab (Chrome)                     WSL (Ubuntu)
@@ -14,6 +20,8 @@ Folders:
 - `extension/`: the Chrome extension
 - `helper/overleaf_live.py`: the helper (runs in WSL)
 - `texpresso/png-export.patch`: changes TeXpresso so it renders the visible pages to PNG files, finds `.tex` files in `-I` folders and pictures in TeX Live, draws transparency (TikZ `opacity`) and hairlines of at least one pixel, and reports the end of the document
+- `extension/engine/`: the browser engine (WebAssembly TeXpresso, built from `wasm/`)
+- `wasm/`: how to build TeXpresso for WebAssembly, and its tests
 - `install.sh`: installs everything in WSL
 - `update.sh`: gets the newest version from GitHub and installs it
 
@@ -87,6 +95,24 @@ It gets the newest version from GitHub, rebuilds TeXpresso only when its patch c
 6. **PDF in a separate tab**: use Overleaf's **Layout → PDF in separate tab**. The editor tab sends the edits, and the separate tab shows the live pages with the same toolbar. Turning Live on or off in one tab changes both. You can drag the tab out to its own window.
 
 The project's copy on your PC is in `~/.overleaf-live/<project id>/` in WSL.
+
+## Browser engine
+
+Load the extension folder (`extension/`, or the copy that `install.sh` puts in
+Windows) as an unpacked extension, as before. Then select **Engine → In the
+browser** in the Live menu (the default).
+
+- The first start in Chrome builds the XeLaTeX format (approx. 10 s). Chrome
+  keeps it, so later starts take approx. 3 s.
+- An edit shows in approx. 0.15-0.4 s (native TeXpresso: 0.1-0.15 s).
+- **Limits for now:**
+  - Only the TeX Live files that the latex-templates template needs are in the
+    extension (`extension/engine/tex/`, from TeX Live 2023). A project that
+    needs another package gives a "File ... not found" error: select
+    **Engine → WSL helper** for it. (Next step: TeX Live packages are
+    downloaded when a project needs them.)
+  - **Lua results** (shell escape) work only with the WSL helper.
+  - One project at a time: a second project's tab takes over the engine.
 
 ## Requirements for a project
 

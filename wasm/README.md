@@ -1,4 +1,4 @@
-# TeXpresso in WASM (phases 1 and 2)
+# TeXpresso in WASM (phases 1 to 3)
 
 This folder builds the TeXpresso engine (`texpresso-xetex`) for WebAssembly.
 Phase 1 shows that the engine runs in a Chrome Web Worker and gives the same
@@ -101,3 +101,32 @@ run as two WASM modules in one worker. `js/kernel.js` connects them.
 - `ASYNCIFY_ONLY` (smaller and faster engine), a faster restore.
 - If the engine aborts, make a new engine instance.
 - Send command text without `\uXXXX` escapes (as the helper's `sexp_string`); TeXpresso does not read them.
+
+## Phase 3: in the extension (14 Nov 2026)
+
+- `extension/engine/`: `offscreen.html` + `offscreen.js` (an offscreen
+  document, reason WORKERS) start `worker.js`, a JavaScript copy of the
+  helper's project logic (`helper/overleaf_live.py`) with the WASM TeXpresso.
+  The messages are the same as the helper's WebSocket messages.
+- `background.js` connects each tab either to the offscreen document
+  (`engine: browser`, default) or to the WSL helper (`engine: wsl`).
+- The XeLaTeX format is built on the first start and kept in the Origin
+  Private File System of the extension.
+- Built files in `extension/engine/`: copy them after a build
+  (`build-engine.sh kernel` with `ENGINE_ENV=worker`, `build-driver.sh` with
+  `DRIVER_ENV=worker OUT=../extension/engine/texpresso.js`, `js/kernel.js`).
+- `tex/bundle.json` + `tex/bundle.bin`: the TeX Live 2023 files that native
+  TeXpresso reads for the latex-templates template (strace), 448 files,
+  15.4 MiB. Phase 4 replaces it with downloads on demand.
+- Fewer fences: `TXP_MAX_FENCES` (default 4; natively 16), because each
+  fence is a snapshot.
+
+### Results (headless Chrome 153, the extension loaded, 2-core VM)
+
+| Step | Native TeXpresso | Extension, first start | Extension, later start |
+|---|---|---|---|
+| First page | 2.1-2.4 s | 9.5 s (format build) | 2.7 s |
+| Edit 1 (page 3) | 0.12-0.15 s | 0.49 s | 0.40 s |
+| Edit 2 (page 3) | 0.10-0.12 s | 0.18 s | 0.15 s |
+
+Pages 1-3 after the two edits: identical to native TeXpresso.
