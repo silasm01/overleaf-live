@@ -243,7 +243,8 @@ class Project:
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
         caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?( element)?\)$')
         back_re = re.compile(r'^\(synctex "(.*)" (-?\d+) (-?\d+)\)$')
-        field_re = re.compile(r'^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"\)$')
+        field_re = re.compile(r'^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01]))?\)$')
+        apply_re = re.compile(r'^\(synctex-apply "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)"\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
             raw = await proc.stdout.readline()
@@ -285,7 +286,18 @@ class Project:
                     text = re.sub(r'\\(.)', lambda k: "\n" if k[1] == "n" else k[1], m[10])
                     await self.send({"type": "field", "path": rel,
                                      "from": [int(m[2]), int(m[3])], "to": [int(m[4]), int(m[5])],
-                                     "box": [float(m[i]) for i in range(6, 10)], "text": text})
+                                     "box": [float(m[i]) for i in range(6, 10)], "text": text,
+                                     "sel": [int(m[11]), int(m[12])] if m[11] else None,
+                                     "shared": m[13] == "1"})
+                continue
+            m = apply_re.match(line)
+            if m:
+                rel = self.project_path(re.sub(r'\\(.)', r'\1', m[1]))
+                if rel:
+                    unesc = lambda t: re.sub(r'\\(.)', lambda k: "\n" if k[1] == "n" else k[1], t)
+                    await self.send({"type": "apply", "path": rel,
+                                     "from": [int(m[2]), int(m[3])], "to": [int(m[4]), int(m[5])],
+                                     "old": unesc(m[6]), "text": unesc(m[7])})
                 continue
             m = back_re.match(line)
             if m:

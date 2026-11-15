@@ -606,7 +606,12 @@
       else closeField();
     }, 150));
     // after the editor took the focus for the selection
-    setTimeout(() => { input.focus(); input.select(); }, 250);
+    // the field is selected (in a command call, the clicked argument)
+    setTimeout(() => {
+      input.focus();
+      if (f.sel) input.setSelectionRange(f.sel[0], f.sel[1]);
+      else input.select();
+    }, 250);
   }
 
   // --- the debug panel (Alt+Shift+G) -------------------------------------
@@ -761,7 +766,8 @@
       if (panel) panel.querySelector(".olive-debug-elinfo").textContent = "";
     }
 
-    const KIND_COLORS = { P: "#c92a2a", s: "#c92a2a", p: "#1971c2", n: "#2f9e44", t: "#ae3ec9" };
+    const KIND_COLORS = { P: "#c92a2a", s: "#c92a2a", p: "#1971c2", n: "#2f9e44", t: "#ae3ec9",
+                          L: "#1971c2", c: "#e8590c" };
     function elements(msg) {
       if (!elementsOn) return;
       lastElements = msg;
@@ -1005,13 +1011,30 @@
       case "field":
         pendingField = msg;
         break;
+      case "apply":
+        // a change made at once (a K-map cell toggled): page.js checks that
+        // the source is still the same
+        if (!docId || pathOf(docId) !== msg.path) {
+          setStatus(`not changed: ${msg.path} is not open in the editor`, false);
+          break;
+        }
+        window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: msg.from[0], column: msg.from[1],
+          toLine: msg.to[0], toColumn: msg.to[1], expect: msg.old, text: msg.text }, location.origin);
+        break;
       case "goto": {
         // a field: select it in the editor, and open the edit box on the page
         const f = pendingField;
         pendingField = null;
         if (f && f.path === msg.path && f.from[0] === msg.line && f.from[1] === msg.column) {
-          gotoSource({ ...msg, toLine: f.to[0], toColumn: f.to[1] });
-          openField(f);
+          // the editor selects the field (in a command call on one line: only
+          // the clicked argument of it)
+          const one = f.sel && f.from[0] === f.to[0];
+          gotoSource({ ...msg, column: one ? f.from[1] + f.sel[0] : f.from[1],
+                       toLine: f.to[0], toColumn: one ? f.from[1] + f.sel[1] : f.to[1] });
+          // a field that shows in several places (e.g. \autoterms[0] in all
+          // K-map cells): an edit would change all of them, so no edit box
+          if (!f.shared) openField(f);
+          else setStatus("this value shows in several places: change it in the editor", false);
         } else {
           gotoSource(msg);
         }

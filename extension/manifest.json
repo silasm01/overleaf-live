@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Overleaf Live (TeXpresso)",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Live preview for Overleaf, typeset by TeXpresso in your browser (WebAssembly) or on your PC (WSL helper).",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmiOhCQo4JeUxkRR2vceR/WkRRz+iwzBuvrixkGFHZfUyC5KM0xYjQ2w8bDxdosDB5bY85AfLCOmBQplovW5mkINZ7hZyqW6PARNBHd8uvFfJoh0WU3TwIWk+A5psFJmqSsqorepVlGpUKTe2l865Mi86UNDf8Sv4cr0pvf9M03dtZb3SXRpmV/9v7QG5ejCfI0P/OYAEsYQdzIZlzxlpD8L2vL+YkgiTmQncHaC11aKIAJWzx7NHaNe9sozBkvEF503LmXRHVRp5j3UukhHYU+XM5dXrfqNUw7JUohU5r7LXRvUmDwP1bfBnbfdGvzK4JKGoUIvOIKFWMt/9ddXL5QIDAQAB",
   "minimum_chrome_version": "121",
