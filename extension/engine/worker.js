@@ -269,6 +269,7 @@ async function start() {
     P.pages.clear();
     command(`(export-png ${sexpString(EXPORT)} ${P.width})`);
     command(`(export-range ${P.first} ${P.last})`);
+    if (P.caretDebug) command('(caret-debug t)');
     command('(rescan)');
     status('typesetting', true);
   })().finally(() => { P.starting = null; });
@@ -467,7 +468,9 @@ function fail(e) {
 const pageRe = /^\(page-image (\d+) (\d+) (\d) "(.*)"(?: ([\d.]+) ([\d.]+))?\)$/;
 const countRe = /^\(page-count (\d+) (\d)\)$/;
 const appendRe = /^\(append out (\d+) "(.*)"\)$/;
-const caretRe = /^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)\)$/;
+// (synctex-target page x y h d [box x0 y0 x1 y1]): the box of a part that
+// does not map 1:1 to its glyphs (\infty, \ref{...}, a picture)
+const caretRe = /^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?\)$/;
 const backRe = /^\(synctex "(.*)" (-?\d+) (-?\d+)\)$/;
 const truncRe = /^\(truncate out (\d+)\)$/;
 const unescape = s => s.replace(/\\(.)/g, (_, c) => c === 'n' ? '\n' : c);
@@ -481,7 +484,11 @@ function onLine(run, line) {
     send({ type: 'page', page: +m[1], count: +m[2], done: m[3] === '1', png: toBase64(data),
       w: parseFloat(m[5] || '595.28'), h: parseFloat(m[6] || '841.89') });
   } else if ((m = line.match(caretRe))) {
-    send({ type: 'caret', page: +m[1], x: +m[2], y: +m[3], h: +m[4], d: +m[5] });
+    const caret = { type: 'caret', page: +m[1], x: +m[2], y: +m[3], h: +m[4], d: +m[5] };
+    if (m[6]) caret.box = m[6].trim().split(' ').map(Number);
+    send(caret);
+  } else if (line.startsWith('(synctex-debug ')) {
+    send(parseCaretDebug(line));
   } else if ((m = line.match(backRe))) {
     let path = unescape(m[1]);
     if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
@@ -496,6 +503,20 @@ function onLine(run, line) {
   } else if (line === '(flush)') {
     reportErrors(run);
   }
+}
+
+// (synctex-debug page n line col x y h d box ... m x0 y0 x1 y1 ...): the
+// caret of every character near the cursor (the debug panel draws them)
+function parseCaretDebug(line) {
+  const v = line.slice(1, -1).split(' ').slice(1).map(Number);
+  const page = v[0], n = v[1];
+  let i = 2;
+  const points = [];
+  for (let k = 0; k < n; k++, i += 7) points.push(v.slice(i, i + 7));
+  const m = v[i++] || 0;
+  const boxes = [];
+  for (let k = 0; k < m; k++, i += 4) boxes.push(v.slice(i, i + 4));
+  return { type: 'caretDebug', page, points, boxes };
 }
 
 function reportErrors(run) {
@@ -583,6 +604,10 @@ const handlers = {
     command(`(synctex-scan ${Math.max(0, msg.page | 0)} ${(+msg.x || 0).toFixed(2)} ${(+msg.y || 0).toFixed(2)})`);
   },
   lua(client, msg) { P.lua = !!msg.on; },
+  caretDebug(client, msg) {
+    P.caretDebug = !!msg.on;
+    if (P.run) command(`(caret-debug ${P.caretDebug ? 't' : 'nil'})`);
+  },
   ping() {},
 };
 

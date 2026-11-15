@@ -84,3 +84,46 @@
   background: #fff !important; border: 1px solid #bbb !important; border-radius: 4px !important; padding: 3px 10px !important;
 }
 .olive-menu-buttons button:hover { background: #eee !important; }
+
+/* a part that does not map 1:1 to its glyphs (\infty, \ref{...}, a picture):
+   a box around it, the caret at its start */
+.olive-caret-box {
+  position: absolute; pointer-events: none; box-sizing: border-box;
+  border: 1.5px solid #e8590c; border-radius: 2px; background: rgba(232, 89, 12, .06);
+}
+.pdf-dark-mode .olive-caret-box { border-color: #ff922b; background: rgba(255, 146, 43, .10); }
+
+/* --- the debug panel (Alt+Shift+D) --- */
+.olive-debug {
+  position: fixed; top: 64px; right: 16px; z-index: 10000; width: 420px; max-width: 90vw;
+  max-height: calc(100vh - 96px); overflow: auto; box-sizing: border-box;
+  background: #fff; color: #222; border: 1px solid #bbb; border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); padding: 8px 12px 10px;
+  font: 12px/1.45 system-ui, sans-serif;
+}
+.olive-debug[hidden] { display: none; }
+.olive-debug section { border-top: 1px solid #e5e5e5; padding: 6px 0; }
+.olive-debug label { display: flex !important; align-items: center; gap: 6px; margin: 0 !important;
+  font: 600 12px/1.4 system-ui, sans-serif !important; color: #222 !important; cursor: pointer; }
+.olive-debug label input { margin: 0 !important; }
+.olive-debug-head { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
+.olive-debug-version { color: #777; flex: 1; }
+.olive-debug button {
+  all: unset; cursor: pointer; font: 11px/1 system-ui, sans-serif !important; color: #333 !important;
+  border: 1px solid #bbb !important; border-radius: 4px !important; padding: 3px 7px !important; background: #f6f6f6 !important;
+}
+.olive-debug button:hover { background: #e9e9e9 !important; }
+.olive-debug .olive-debug-close { border: none !important; background: none !important; font-size: 16px !important; padding: 0 4px !important; }
+.olive-debug-title { display: flex; align-items: center; gap: 6px; font-weight: 600; margin-bottom: 4px; }
+.olive-debug-title button:first-of-type { margin-left: auto; }
+.olive-debug-note { color: #666; margin-top: 3px; }
+.olive-debug-mapinfo { color: #444; margin-top: 3px; }
+.olive-debug pre {
+  margin: 0 !important; padding: 6px 8px !important; white-space: pre-wrap; word-break: break-all;
+  background: #f6f6f6 !important; color: #222 !important; border: 1px solid #e2e2e2 !important; border-radius: 4px;
+  font: 11px/1.4 ui-monospace, monospace !important;
+}
+.olive-debug-log { max-height: 220px; overflow: auto; }
+.olive-debug-layer { position: absolute; inset: 0; pointer-events: none; }
+.olive-debug-tick { position: absolute; width: 1px; opacity: .85; }
+.olive-debug-box { position: absolute; box-sizing: border-box; border: 1px dashed #f08c00; }

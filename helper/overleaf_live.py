@@ -29,6 +29,7 @@ Messages (JSON, one per WebSocket message)
     {"type": "cursor", "path": p, "line": n, "column": n}   editor cursor
                                              (line from 1, column from 0)
     {"type": "scan", "page": n, "x": pt, "y": pt}   double-click on a page
+    {"type": "caretDebug", "on": bool}       debug panel: the caret map
   helper -> extension
     {"type": "versions", "extension": "0.1.1"}   the version install.sh put
                                              in the Windows folder
@@ -37,9 +38,14 @@ Messages (JSON, one per WebSocket message)
      "w": points, "h": points}                page size
     {"type": "count", "count": n, "done": bool}   pages so far; done: all
     {"type": "errors", "lines": ["...", ...]}
-    {"type": "caret", "page": n, "x": pt, "y": pt, "h": pt, "d": pt}
-                                             the cursor in the PDF (y is the
-                                             baseline; h, d: line height)
+    {"type": "caret", "page": n, "x": pt, "y": pt, "h": pt, "d": pt,
+     "box": [x0, y0, x1, y1]}                the cursor in the PDF (y is the
+                                             baseline; h, d: line height; box:
+                                             only for a part that does not map
+                                             1:1 to its glyphs, e.g. a math symbol)
+    {"type": "caretDebug", "page": n, "points": [[line, col, x, y, h, d, box], ...],
+     "boxes": [[x0, y0, x1, y1], ...]}       debug panel: every character near
+                                             the cursor
     {"type": "goto", "path": p, "line": n, "column": n}   reverse search
 
 SyncTeX: TeXpresso's engine (patched) writes the column next to the line
@@ -95,6 +101,7 @@ class Project:
         self.clients = set()
         self.main = ""
         self.lua = False
+        self.caret_debug = False
         self.pages = {}             # page -> last "page" message (for new tabs)
         self.last_msg = {}          # "status", "errors", "count" -> last message
         self.width = 1000
@@ -193,6 +200,8 @@ class Project:
         self.reader = asyncio.create_task(self.read_texpresso(self.proc))
         await self.command(f"(export-png {sexp_string(str(self.export_dir))} {int(self.width)})")
         await self.command(f"(export-range {self.first} {self.last})")
+        if self.caret_debug:
+            await self.command("(caret-debug t)")
         await self.command("(rescan)")
         await self.status("typesetting", True)
 
@@ -222,7 +231,7 @@ class Project:
         page_re = re.compile(r'^\(page-image (\d+) (\d+) (\d) "(.*)"(?: ([\d.]+) ([\d.]+))?\)$')
         count_re = re.compile(r'^\(page-count (\d+) (\d)\)$')
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
-        caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)\)$')
+        caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?\)$')
         back_re = re.compile(r'^\(synctex "(.*)" (-?\d+) (-?\d+)\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
@@ -244,8 +253,14 @@ class Project:
                 continue
             m = caret_re.match(line)
             if m:
-                await self.send({"type": "caret", "page": int(m[1]), "x": float(m[2]),
-                                 "y": float(m[3]), "h": float(m[4]), "d": float(m[5])})
+                caret = {"type": "caret", "page": int(m[1]), "x": float(m[2]),
+                         "y": float(m[3]), "h": float(m[4]), "d": float(m[5])}
+                if m[6]:
+                    caret["box"] = [float(v) for v in m[6].split()]
+                await self.send(caret)
+                continue
+            if line.startswith("(synctex-debug "):
+                await self.send(parse_caret_debug(line))
                 continue
             m = back_re.match(line)
             if m:
@@ -426,11 +441,30 @@ class Project:
         x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
         await self.command(f"(synctex-scan {page} {x:.2f} {y:.2f})")
 
+    async def on_caret_debug(self, ws, msg):
+        self.caret_debug = bool(msg.get("on"))
+        await self.command(f"(caret-debug {'t' if self.caret_debug else 'nil'})")
+
     async def on_lua(self, ws, msg):
         self.lua = bool(msg.get("on"))
         if self.lua:
             self.last_edit = 0
             self.schedule_lua()
+
+def parse_caret_debug(line):
+    """(synctex-debug page n line col x y h d box ... m x0 y0 x1 y1 ...)"""
+    v = [float(x) for x in line[1:-1].split()[1:]]
+    page, n = int(v[0]), int(v[1])
+    i = 2
+    points = []
+    for _ in range(n):
+        points.append(v[i:i + 7])
+        i += 7
+    m = int(v[i]) if i < len(v) else 0
+    i += 1
+    boxes = [v[i + 4 * k:i + 4 * k + 4] for k in range(m)]
+    return {"type": "caretDebug", "page": page, "points": points, "boxes": boxes}
+
 
 PROJECTS = {}                   # project id -> Project
 
@@ -465,7 +499,7 @@ async def handler(ws, path=None):
                     "project": project.on_project, "edit": project.on_edit,
                     "view": project.on_view, "width": project.on_width,
                     "lua": project.on_lua, "cursor": project.on_cursor,
-                    "scan": project.on_scan}.get(kind)
+                    "scan": project.on_scan, "caretDebug": project.on_caret_debug}.get(kind)
                 if handler_fn:
                     await handler_fn(ws, msg)
             except Exception as e:          # one bad message must not end the connection

@@ -1,4 +1,4 @@
-From 9073e06202e65a6bad5833615dff101fba21230d Mon Sep 17 00:00:00 2001
+From cc8591e56ad2426709c07a502cba15cb24ba73c0 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -6,21 +6,21 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  the glyphs
 
 ---
- src/dvi/dvi_prim.c                |   4 +-
- src/dvi/dvi_resmanager.c          |  62 ++-
- src/dvi/dvi_special.c             |  48 +-
- src/dvi/dvi_special.re2c.c        |  48 +-
- src/dvi/mydvi.h                   |   2 +
- src/engine/engine/xetex-synctex.c |  44 +-
- src/engine/engine/xetex-xetex0.c  |  25 +-
- src/engine/engine/xetex-xetexd.h  |  11 +
- src/frontend/editor.c             |  73 ++-
- src/frontend/editor.h             |  23 +
- src/frontend/engine_tex.c         |  71 +++
- src/frontend/main.c               | 350 ++++++++++++
- src/frontend/synctex.c            | 898 ++++++++++++++++++++++++++++++
- src/frontend/synctex.h            |  24 +
- 14 files changed, 1626 insertions(+), 57 deletions(-)
+ src/dvi/dvi_prim.c                |    4 +-
+ src/dvi/dvi_resmanager.c          |   62 +-
+ src/dvi/dvi_special.c             |   52 +-
+ src/dvi/dvi_special.re2c.c        |   52 +-
+ src/dvi/mydvi.h                   |    2 +
+ src/engine/engine/xetex-synctex.c |   44 +-
+ src/engine/engine/xetex-xetex0.c  |   25 +-
+ src/engine/engine/xetex-xetexd.h  |   11 +
+ src/frontend/editor.c             |   83 +-
+ src/frontend/editor.h             |   28 +
+ src/frontend/engine_tex.c         |   71 ++
+ src/frontend/main.c               |  477 +++++++++++
+ src/frontend/synctex.c            | 1245 +++++++++++++++++++++++++++++
+ src/frontend/synctex.h            |   41 +
+ 14 files changed, 2140 insertions(+), 57 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -139,10 +139,22 @@ index f702dfa..df97614 100644
    fz_catch(ctx)
    {
 diff --git a/src/dvi/dvi_special.c b/src/dvi/dvi_special.c
-index 516e30d..9e98efb 100644
+index 516e30d..733ba92 100644
 --- a/src/dvi/dvi_special.c
 +++ b/src/dvi/dvi_special.c
-@@ -3010,9 +3010,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -1140,7 +1140,11 @@ embed_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, struct xform_spec *xf
+     fz_matrix ctm = fz_flip_vertically(dvi_get_ctm(dc, st));
+     ctm = fz_concat(xf->ctm, ctm);
+     ctm = fz_pre_translate(ctm, 0, mediabox.y0 - mediabox.y1);
++    /* Overleaf Live: a marker around the picture, for the caret (a layer
++       does not change the rendering) */
++    fz_begin_layer(ctx, dc->dev, "olive-picture");
+     pdf_run_page(ctx, page, dc->dev, ctm, NULL);
++    fz_end_layer(ctx, dc->dev);
+   }
+   fz_catch(ctx)
+   {
+@@ -3010,9 +3014,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_path *path = get_path(ctx, dc);
              fz_closepath(ctx, path);
              fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
@@ -154,7 +166,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3026,9 +3026,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3026,9 +3030,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_path *path = get_path(ctx, dc);
              fz_closepath(ctx, path);
              fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
@@ -166,7 +178,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3041,9 +3041,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3041,9 +3045,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              get_stroke_state(ctx, st, &stst);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
@@ -178,7 +190,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3056,9 +3056,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3056,9 +3060,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              get_stroke_state(ctx, st, &stst);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
@@ -190,7 +202,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3070,7 +3070,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3070,7 +3074,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_matrix ctm = dvi_get_ctm(dc, st);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
@@ -199,7 +211,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3081,7 +3081,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3081,7 +3085,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_matrix ctm = dvi_get_ctm(dc, st);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
@@ -208,7 +220,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3094,7 +3094,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3094,7 +3098,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              get_stroke_state(ctx, st, &stst);
              fz_path *path = get_path(ctx, dc);
              fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
@@ -217,7 +229,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3108,7 +3108,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3108,7 +3112,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_path *path = get_path(ctx, dc);
              fz_closepath(ctx, path);
              fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
@@ -226,7 +238,7 @@ index 516e30d..9e98efb 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -3166,9 +3166,31 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -3166,9 +3170,31 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
            break;
          }
  
@@ -260,10 +272,22 @@ index 516e30d..9e98efb 100644
          case PDF_OP_y:
          case PDF_OP_BT:
 diff --git a/src/dvi/dvi_special.re2c.c b/src/dvi/dvi_special.re2c.c
-index f4878b6..1c2fa4d 100644
+index f4878b6..2955fd9 100644
 --- a/src/dvi/dvi_special.re2c.c
 +++ b/src/dvi/dvi_special.re2c.c
-@@ -885,9 +885,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -463,7 +463,11 @@ embed_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, struct xform_spec *xf
+     fz_matrix ctm = fz_flip_vertically(dvi_get_ctm(dc, st));
+     ctm = fz_concat(xf->ctm, ctm);
+     ctm = fz_pre_translate(ctm, 0, mediabox.y0 - mediabox.y1);
++    /* Overleaf Live: a marker around the picture, for the caret (a layer
++       does not change the rendering) */
++    fz_begin_layer(ctx, dc->dev, "olive-picture");
+     pdf_run_page(ctx, page, dc->dev, ctm, NULL);
++    fz_end_layer(ctx, dc->dev);
+   }
+   fz_catch(ctx)
+   {
+@@ -885,9 +889,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_path *path = get_path(ctx, dc);
              fz_closepath(ctx, path);
              fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
@@ -275,7 +299,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -901,9 +901,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -901,9 +905,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_path *path = get_path(ctx, dc);
              fz_closepath(ctx, path);
              fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
@@ -287,7 +311,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -916,9 +916,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -916,9 +920,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              get_stroke_state(ctx, st, &stst);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
@@ -299,7 +323,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -931,9 +931,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -931,9 +935,9 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              get_stroke_state(ctx, st, &stst);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
@@ -311,7 +335,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -945,7 +945,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -945,7 +949,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_matrix ctm = dvi_get_ctm(dc, st);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 0, ctm, device_cs(ctx),
@@ -320,7 +344,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -956,7 +956,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -956,7 +960,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_matrix ctm = dvi_get_ctm(dc, st);
              fz_path *path = get_path(ctx, dc);
              fz_fill_path(ctx, dc->dev, path, 1, ctm, device_cs(ctx),
@@ -329,7 +353,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -969,7 +969,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -969,7 +973,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              get_stroke_state(ctx, st, &stst);
              fz_path *path = get_path(ctx, dc);
              fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
@@ -338,7 +362,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -983,7 +983,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -983,7 +987,7 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
              fz_path *path = get_path(ctx, dc);
              fz_closepath(ctx, path);
              fz_stroke_path(ctx, dc->dev, path, &stst, ctm, device_cs(ctx),
@@ -347,7 +371,7 @@ index f4878b6..1c2fa4d 100644
            }
            drop_path(ctx, dc);
            break;
-@@ -1041,9 +1041,31 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
+@@ -1041,9 +1045,31 @@ pdf_code(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t
            break;
          }
  
@@ -567,7 +591,7 @@ index 183c218..ee3637a 100644
  #define GLUE_SPEC_stretch_order(p) mem[p].b16.s1 /* aka "type" of a node */
  #define GLUE_SPEC_shrink_order(p) mem[p].b16.s0 /* aka "subtype" of a node */
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
-index 6face98..374be4e 100644
+index 6face98..b56c58d 100644
 --- a/src/frontend/editor.c
 +++ b/src/frontend/editor.c
 @@ -219,6 +219,50 @@ bool editor_parse(fz_context *ctx,
@@ -621,8 +645,20 @@ index 6face98..374be4e 100644
    else if (strcmp(verb, "rescan") == 0)
    {
      if (len != 1)
-@@ -254,21 +298,48 @@ bool editor_parse(fz_context *ctx,
+@@ -252,23 +296,60 @@ bool editor_parse(fz_context *ctx,
+     *out = (struct editor_command){.tag = EDIT_STAY_ON_TOP,
+                                    .stay_on_top = {.status = status}};
    }
++  else if (strcmp(verb, "caret-debug") == 0)
++  {
++    // (caret-debug t|nil): report the caret of every character near it
++    if (len != 2)
++      goto arity;
++    bool status =
++        truth_value(ctx, stack, val_array_get(ctx, stack, command, 1));
++    *out = (struct editor_command){.tag = EDIT_CARET_DEBUG,
++                                   .caret_debug = {.status = status}};
++  }
    else if (strcmp(verb, "synctex-forward") == 0)
    {
 -    if (len != 3)
@@ -672,10 +708,18 @@ index 6face98..374be4e 100644
    {
      if (len != 1)
 diff --git a/src/frontend/editor.h b/src/frontend/editor.h
-index 05fdd1c..acf9be9 100644
+index 05fdd1c..6cba9fb 100644
 --- a/src/frontend/editor.h
 +++ b/src/frontend/editor.h
-@@ -37,6 +37,10 @@ enum EDITOR_COMMAND
+@@ -28,6 +28,7 @@ enum EDITOR_COMMAND
+   EDIT_RESCAN,
+   EDIT_STAY_ON_TOP,
+   EDIT_SYNCTEX_FORWARD,
++  EDIT_CARET_DEBUG,
+   EDIT_MAP_WINDOW,
+   EDIT_UNMAP_WINDOW,
+   EDIT_CROP,
+@@ -37,6 +38,10 @@ enum EDITOR_COMMAND
    EDIT_RESUME,
    EDIT_RERUN,
    EDIT_RERUN_ONCE,
@@ -686,13 +730,17 @@ index 05fdd1c..acf9be9 100644
  };
  
  struct editor_change
-@@ -105,8 +109,14 @@ struct editor_command
+@@ -105,8 +110,18 @@ struct editor_command
      struct {
        const char *path;
        int line;
 +      int column; /* -1: not known */
      } synctex_forward;
  
++    struct {
++      bool status;
++    } caret_debug;
++
 +    struct {
 +      int page;
 +      float x, y; /* point, from the top left of the page */
@@ -701,7 +749,7 @@ index 05fdd1c..acf9be9 100644
      struct {
        float x, y, w, h;
      } map_window;
-@@ -136,6 +146,19 @@ struct editor_command
+@@ -136,6 +151,19 @@ struct editor_command
  
      struct {
      } rerun_once;
@@ -818,10 +866,10 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..9b90b75 100644
+index c202294..5824a6a 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,170 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,297 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -831,13 +879,89 @@ index c202294..9b90b75 100644
 +
 +static char caret_path[1024];
 +static int caret_line;
++static int caret_debug;   /* (caret-debug t): report every character too */
 +
 +typedef struct {
 +  fz_device super;
 +  synctex_glyph *g;
 +  int n, cap;
 +  float inv;   /* 1 / scale factor: points -> SyncTeX units */
++  int picture;      /* in a picture (layer "olive-picture"): its depth */
++  fz_rect pbox;     /* the box of what the picture draws */
 +} glyph_device;
++
++static void glyph_push(fz_context *ctx, glyph_device *dev, synctex_glyph g)
++{
++  if (dev->n == dev->cap)
++  {
++    int cap = dev->cap ? dev->cap * 2 : 1024;
++    dev->g = fz_realloc_array(ctx, dev->g, cap, synctex_glyph);
++    dev->cap = cap;
++  }
++  dev->g[dev->n++] = g;
++}
++
++/* a picture is one "glyph" without a font: its box */
++static void glyph_picture(fz_context *ctx, glyph_device *dev, fz_rect r)
++{
++  if (fz_is_empty_rect(r) || fz_is_infinite_rect(r))
++    return;
++  if (dev->picture > 0)
++  {
++    dev->pbox = fz_is_empty_rect(dev->pbox) ? r : fz_union_rect(dev->pbox, r);
++    return;
++  }
++  float s = dev->inv;
++  glyph_push(ctx, dev, (synctex_glyph){(int)(r.x0 * s), (int)(r.x1 * s), (int)(r.y1 * s),
++                                       -1, NULL, (int)(r.y0 * s), (int)(r.y1 * s)});
++}
++
++static void glyph_begin_layer(fz_context *ctx, fz_device *dev_, const char *name)
++{
++  glyph_device *dev = (glyph_device *)dev_;
++  (void)ctx;
++  if (dev->picture > 0)
++    dev->picture++;
++  else if (name && strcmp(name, "olive-picture") == 0)
++  {
++    dev->picture = 1;
++    dev->pbox = fz_empty_rect;
++  }
++}
++
++static void glyph_end_layer(fz_context *ctx, fz_device *dev_)
++{
++  glyph_device *dev = (glyph_device *)dev_;
++  if (dev->picture > 0 && --dev->picture == 0)
++    glyph_picture(ctx, dev, dev->pbox);
++}
++
++static void glyph_fill_image(fz_context *ctx, fz_device *dev_, fz_image *img,
++                             fz_matrix ctm, float alpha, fz_color_params cp)
++{
++  (void)img; (void)alpha; (void)cp;
++  glyph_picture(ctx, (glyph_device *)dev_, fz_transform_rect(fz_unit_rect, ctm));
++}
++
++static void glyph_fill_path(fz_context *ctx, fz_device *dev_, const fz_path *path,
++                            int even_odd, fz_matrix ctm, fz_colorspace *cs,
++                            const float *color, float alpha, fz_color_params cp)
++{
++  glyph_device *dev = (glyph_device *)dev_;
++  (void)even_odd; (void)cs; (void)color; (void)alpha; (void)cp;
++  if (dev->picture > 0)   /* only in a picture: TikZ and rules are not glyphs */
++    glyph_picture(ctx, dev, fz_bound_path(ctx, path, NULL, ctm));
++}
++
++static void glyph_stroke_path(fz_context *ctx, fz_device *dev_, const fz_path *path,
++                              const fz_stroke_state *st, fz_matrix ctm, fz_colorspace *cs,
++                              const float *color, float alpha, fz_color_params cp)
++{
++  glyph_device *dev = (glyph_device *)dev_;
++  (void)cs; (void)color; (void)alpha; (void)cp; (void)st;
++  if (dev->picture > 0)   /* the path itself: the stroke bound is too wide (miters) */
++    glyph_picture(ctx, dev, fz_bound_path(ctx, path, NULL, ctm));
++}
 +
 +static void glyph_fill_text(fz_context *ctx, fz_device *dev_, const fz_text *text,
 +                            fz_matrix ctm, fz_colorspace *cs, const float *color,
@@ -858,17 +982,24 @@ index c202294..9b90b75 100644
 +      fz_point p = fz_transform_point(fz_make_point(it->x, it->y), ctm);
 +      float adv = fz_advance_glyph(ctx, span->font, it->gid, span->wmode);
 +      fz_point w = fz_transform_vector(fz_transform_vector(fz_make_point(adv, 0), trm), ctm);
-+      if (dev->n == dev->cap)
-+      {
-+        int cap = dev->cap ? dev->cap * 2 : 1024;
-+        dev->g = fz_realloc_array(ctx, dev->g, cap, synctex_glyph);
-+        dev->cap = cap;
-+      }
 +      float x0 = p.x, x1 = p.x + w.x;
 +      if (x1 < x0) { float t = x0; x0 = x1; x1 = t; }
-+      dev->g[dev->n++] = (synctex_glyph){
++      fz_matrix gm = span->trm;
++      gm.e = it->x;
++      gm.f = it->y;
++      fz_rect ink = fz_transform_rect(fz_bound_glyph(ctx, span->font, it->gid, gm), ctm);
++      if (dev->picture > 0)
++      {
++        /* text in a picture is part of the picture */
++        glyph_picture(ctx, dev, fz_union_rect(ink, fz_make_rect(x0, p.y, x1, p.y)));
++        continue;
++      }
++      int iy0 = (int)(p.y * dev->inv), iy1 = iy0;
++      if (!fz_is_empty_rect(ink) && !fz_is_infinite_rect(ink))
++      { iy0 = (int)(ink.y0 * dev->inv); iy1 = (int)(ink.y1 * dev->inv); }
++      glyph_push(ctx, dev, (synctex_glyph){
 +        (int)(x0 * dev->inv), (int)(x1 * dev->inv), (int)(p.y * dev->inv),
-+        it->gid, fz_keep_font(ctx, span->font)};
++        it->gid, fz_keep_font(ctx, span->font), iy0, iy1});
 +    }
 +  }
 +}
@@ -890,6 +1021,11 @@ index c202294..9b90b75 100644
 +    dl = send(render_page, eng, ctx, page);
 +    dev = fz_new_derived_device(ctx, glyph_device);
 +    dev->super.fill_text = glyph_fill_text;
++    dev->super.fill_image = glyph_fill_image;
++    dev->super.fill_path = glyph_fill_path;
++    dev->super.stroke_path = glyph_stroke_path;
++    dev->super.begin_layer = glyph_begin_layer;
++    dev->super.end_layer = glyph_end_layer;
 +    dev->inv = 1.0f / fs;
 +    fz_run_display_list(ctx, dl, &dev->super, fz_identity, fz_infinite_rect, NULL);
 +    fz_close_device(ctx, &dev->super);
@@ -975,24 +1111,63 @@ index c202294..9b90b75 100644
 +  src->nlines = nl;
 +}
 +
-+static void caret_refine(struct persistent_state *ps, ui_state *ui, synctex_t *stx,
-+                         fz_buffer *buf, int page, int *rx, int *ry, int *rh, int *rd)
++/* the caret of the last forward search (x, y: the point of SyncTeX), on
++   stdout, in points:
++     (synctex-target page x y height depth [box-x0 box-y0 box-x1 box-y1])
++   and with caret-debug, the caret of every character of the window:
++     (synctex-debug page n line col x y height depth box ... m x0 y0 x1 y1 ...) */
++static void caret_report(struct persistent_state *ps, ui_state *ui, synctex_t *stx,
++                         fz_buffer *buf, int page, int x, int y)
 +{
 +  int ng = 0;
 +  synctex_glyph *glyphs = page_glyphs(ps->ctx, ui->eng, page, &ng);
 +  synctex_source src;
 +  caret_source(ps->ctx, ps->doc_path, &src);
-+  synctex_refine_target(ps->ctx, stx, buf, page, glyphs, ng, &src, rx, ry, rh, rd);
++  enum { CAP_PTS = 1024, CAP_BOXES = 256 };
++  static synctex_debug_point pts[CAP_PTS];
++  static synctex_box boxes[CAP_BOXES];
++  synctex_caret_info info = {0};
++  info.debug = caret_debug;
++  info.pts = pts;
++  info.cappts = CAP_PTS;
++  info.boxes = boxes;
++  info.capboxes = CAP_BOXES;
++  int rx = x, ry = y, rh = 0, rd = 0;
++  synctex_refine_target(ps->ctx, stx, buf, page, glyphs, ng, &src, &rx, &ry, &rh, &rd, &info);
 +  for (int i = 0; i < ng; i++)
-+    fz_drop_font(ps->ctx, glyphs[i].font);
++    if (glyphs[i].font)
++      fz_drop_font(ps->ctx, glyphs[i].font);
 +  fz_free(ps->ctx, glyphs);
 +  fz_free(ps->ctx, (int *)src.text);
++  float fs = send(scale_factor, ui->eng);
++  const float pad = 1.0f;   /* points around the box */
++  if (info.has_box)
++    printf("(synctex-target %d %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f)\n",
++           page, fs * rx, fs * ry, fs * rh, fs * rd,
++           fs * info.box.x0 - pad, fs * info.box.y0 - pad,
++           fs * info.box.x1 + pad, fs * info.box.y1 + pad);
++  else
++    printf("(synctex-target %d %.2f %.2f %.2f %.2f)\n",
++           page, fs * rx, fs * ry, fs * rh, fs * rd);
++  if (caret_debug)
++  {
++    printf("(synctex-debug %d %d", page, info.npts);
++    for (int i = 0; i < info.npts; i++)
++      printf(" %d %d %.2f %.2f %.2f %.2f %d", pts[i].line, pts[i].col, fs * pts[i].x,
++             fs * pts[i].y, fs * pts[i].h, fs * pts[i].d, pts[i].box);
++    printf(" %d", info.nboxes);
++    for (int i = 0; i < info.nboxes; i++)
++      printf(" %.2f %.2f %.2f %.2f", fs * boxes[i].x0 - pad, fs * boxes[i].y0 - pad,
++             fs * boxes[i].x1 + pad, fs * boxes[i].y1 + pad);
++    printf(")\n");
++  }
++  fflush(stdout);
 +}
 +
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1081,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1208,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1118,7 +1293,19 @@ index c202294..9b90b75 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1084,11 +1367,32 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +1479,11 @@ static void interpret_command(struct persistent_state *ps,
+       fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
+       break;
+ 
++    case EDIT_CARET_DEBUG:
++      caret_debug = cmd.caret_debug.status;
++      fprintf(stderr, "[command] caret-debug %d\n", caret_debug);
++      break;
++
+     case EDIT_SYNCTEX_FORWARD:
+     {
+       fz_buffer *buf;
+@@ -1084,11 +1499,32 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -1151,7 +1338,7 @@ index c202294..9b90b75 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1438,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1570,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1185,7 +1372,7 @@ index c202294..9b90b75 100644
    }
  }
  
-@@ -1353,6 +1684,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +1816,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -1200,24 +1387,19 @@ index c202294..9b90b75 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +1744,16 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +1876,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
 +        {
 +          /* Overleaf Live: report the caret in points:
 +             (synctex-target page x y height depth) */
-+          int rx = x, ry = y, rh = 0, rd = 0;
-+          caret_refine(ps, ui, stx, buf, page, &rx, &ry, &rh, &rd);
-+          float fs = send(scale_factor, ui->eng);
-+          printf("(synctex-target %d %.2f %.2f %.2f %.2f)\n",
-+                 page, fs * rx, fs * ry, fs * rh, fs * rd);
-+          fflush(stdout);
++          caret_report(ps, ui, stx, buf, page, x, y);
 +        }
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2029,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2156,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -1226,7 +1408,7 @@ index c202294..9b90b75 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..80aacae 100644
+index 3f0b8f5..6a804b7 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -1271,7 +1453,7 @@ index 3f0b8f5..80aacae 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +928,887 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +928,1234 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -1541,7 +1723,7 @@ index 3f0b8f5..80aacae 100644
 +/* What the source says at each character: a character that may make a glyph
 +   (CAND), a space (SPACE: no glyph, the end of a word), or something that
 +   makes no glyph of its own (OTHER: a command name, braces, a comment). */
-+enum { CH_OTHER, CH_SPACE, CH_CAND };
++enum { CH_OTHER, CH_SPACE, CH_CAND, CH_COMMENT };
 +
 +static int is_letter_cp(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 +
@@ -1577,7 +1759,7 @@ index 3f0b8f5..80aacae 100644
 +    if (c == '%')
 +    {
 +      /* a comment, and its line break: no space */
-+      while (i < n && s[i] != '\n') k[i++] = CH_OTHER;
++      while (i < n && s[i] != '\n') k[i++] = CH_COMMENT;
 +      if (i < n) k[i++] = CH_OTHER;
 +      continue;
 +    }
@@ -1681,56 +1863,90 @@ index 3f0b8f5..80aacae 100644
 +   records whose source character before is a space). Between the anchors,
 +   the source characters are aligned with the glyphs by character (the
 +   longest common subsequence, with the fonts' character maps). A character
-+   with a glyph gets its left edge; the others go between their neighbours
-+   with glyphs. Returns 0 if it can't (then the caller keeps the
-+   interpolated point). */
-+static int refine_with_glyphs(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
-+                              int page, int tag, int line, int col,
-+                              const synctex_glyph *glyphs, int nglyphs,
-+                              const synctex_source *source,
-+                              int *x, int *y, int *h, int *d)
-+{
-+  if (!source || !source->text || !glyphs || nglyphs <= 0 || col < 0)
-+    return 0;
-+  int li = line - source->first_line;
-+  if (li < 0 || li >= source->nlines)
-+    return 0;
-+  const int *src = source->text;
-+  int srclen = source->len;
-+  int line_end = (li + 1 < source->nlines) ? source->offsets[li + 1] - 1 : srclen;
-+  int c = source->offsets[li] + col;
-+  if (c > line_end) c = line_end;
++   with a glyph gets its left edge. A part of the source without glyphs of
++   its own between glyphs that no character took (\infty, \ref{...}, a
++   picture) is a group: the caret goes to the start of its glyphs and the
++   viewer shows a box around them. Other characters go next to their
++   neighbours with glyphs. */
++struct rc {
++  fz_context *ctx;
++  const synctex_glyph *glyphs;
++  const synctex_source *source;
++  const int *src;
++  int srclen;
++  unsigned char *kind;
++  struct sglyph *g;
++  int n;
++  struct line_box *lines;
++  int nlines;
++  struct glue_rec *glues;
++  int nglues;
++  int slack, dbg;
++  int *match, *order, *dp;
++  long dpcap;
++  int ks0, ks1, kq0, kq1;     /* the alignment that is in match[] */
++};
 +
-+  enum { MAXL = 1024, MAXR = 1024 };
-+  static struct line_box lines[MAXL];
-+  static struct glue_rec glues[MAXR];
++enum { RC_MAXL = 1024, RC_MAXR = 1024 };
++static struct line_box rc_lines[RC_MAXL];
++static struct glue_rec rc_glues[RC_MAXR];
++
++static void rc_free(struct rc *r)
++{
++  free(r->kind); free(r->g); free(r->match); free(r->order); free(r->dp);
++  memset(r, 0, sizeof(*r));
++}
++
++static int rc_prepare(struct rc *r, fz_context *ctx, synctex_t *stx, fz_buffer *buf,
++                      int page, int tag, const synctex_glyph *glyphs, int nglyphs,
++                      const synctex_source *source)
++{
++  memset(r, 0, sizeof(*r));
++  if (!source || !source->text || !glyphs || nglyphs <= 0)
++  {
++    if (getenv("TXP_CARET_DEBUG"))
++      fprintf(stderr, "[caret] no source (%p) or glyphs (%d)\n", (void *)(source ? source->text : NULL), nglyphs);
++    return 0;
++  }
++  r->ctx = ctx;
++  r->glyphs = glyphs;
++  r->source = source;
++  r->src = source->text;
++  r->srclen = source->len;
++  r->slack = 65536;   /* 1pt in SyncTeX units (sp) */
++  r->dbg = getenv("TXP_CARET_DEBUG") != NULL;
++  r->ks0 = -1;
 +  struct glyph_env e = {tag, source->first_line, source->nlines, source->offsets,
-+                        lines, 0, MAXL, glues, 0, MAXR};
++                        rc_lines, 0, RC_MAXL, rc_glues, 0, RC_MAXR};
 +  walk_page(ctx, stx, buf, page, glyph_walk_fn, &e);
-+  int dbg = getenv("TXP_CARET_DEBUG") != NULL;
 +  if (e.nlines == 0)
 +    return 0;
-+  int slack = 65536;   /* 1pt in SyncTeX units (sp) */
-+
-+  unsigned char *kind = malloc(srclen + 1);
-+  struct sglyph *g = malloc(sizeof(*g) * nglyphs);
-+  int *order = NULL, *dp = NULL, *match = NULL;
-+  if (!kind || !g) goto fail;
-+  classify_source(src, srclen, kind);
++  r->lines = rc_lines;
++  r->nlines = e.nlines;
++  r->glues = rc_glues;
++  r->nglues = e.nglues;
++  r->kind = malloc(r->srclen + 1);
++  r->g = malloc(sizeof(*r->g) * nglyphs);
++  r->match = malloc(sizeof(int) * (r->srclen + 1));
++  r->order = malloc(sizeof(int) * (r->srclen + 1));
++  if (!r->kind || !r->g || !r->match || !r->order)
++    return 0;
++  classify_source(r->src, r->srclen, r->kind);
 +
 +  /* the glyph stream. A glyph belongs to the smallest line box around it;
 +     in a box, glyphs whose baselines are within 6pt make one line (a
 +     superscript stays in its line, the rows of a table do not). Order:
 +     box, line in the box (top down), x. g[i].line = index of that line in
 +     segs[], g[i].index = index in glyphs[]. */
-+  int n = 0;
++  struct sglyph *g = r->g;
++  int n = 0, slack = r->slack;
 +  for (int i = 0; i < nglyphs; i++)
 +  {
-+    int l = line_of_point(lines, e.nlines, (glyphs[i].x0 + glyphs[i].x1) / 2, glyphs[i].y, slack / 4);
++    int l = line_of_point(r->lines, r->nlines, (glyphs[i].x0 + glyphs[i].x1) / 2,
++                          glyphs[i].y, slack / 4);
 +    if (l >= 0)
 +      g[n++] = (struct sglyph){glyphs[i].x0, glyphs[i].x1, l, i};
 +  }
-+  /* by box, then baseline */
 +  for (int i = 0; i < n; i++) g[i].y = glyphs[g[i].index].y;
 +  qsort(g, n, sizeof(g[0]), cmp_sglyph_box_y);
 +  nsegs = 0;
@@ -1740,7 +1956,7 @@ index 3f0b8f5..80aacae 100644
 +        g[i].y - segs[nsegs - 1].y0 > 6 * slack)
 +    {
 +      if (nsegs == MAXS) { n = i; break; }
-+      const struct line_box *b = &lines[g[i].line];
++      const struct line_box *b = &r->lines[g[i].line];
 +      int tall = b->h + b->d > 30 * slack;
 +      segs[nsegs] = (struct seg){g[i].line, g[i].y, g[i].y,
 +                                 tall ? 8 * slack : b->h, tall ? 3 * slack : b->d, tall};
@@ -1753,25 +1969,49 @@ index 3f0b8f5..80aacae 100644
 +  }
 +  /* the baseline of a line: the most common one (not a superscript) */
 +  for (int k = 0; k < nsegs; k++)
-+    if (!segs[k].tall) segs[k].y = lines[segs[k].box].y;
++    if (!segs[k].tall) segs[k].y = r->lines[segs[k].box].y;
 +  qsort(g, n, sizeof(g[0]), cmp_sglyph);
++  r->n = n;
++  if (r->dbg)
++    fprintf(stderr, "[caret] page %d: %d glyphs, %d in lines, %d line boxes, %d records\n",
++            page, nglyphs, n, r->nlines, r->nglues);
++  return n > 0;
++}
 +
-+  /* anchors: (character offset of a word start, index of its first glyph) */
++/* the source line (index in the window) of character c */
++static int rc_line_of(const struct rc *r, int c)
++{
++  int li = 0;
++  while (li + 1 < r->source->nlines && r->source->offsets[li + 1] <= c) li++;
++  return li;
++}
++
++struct span { int s0, s1, q0, q1, aL, pL, aR, pR, ox, oy; };
++
++/* Anchors and the part to align for character c (ox, oy: the point that
++   SyncTeX found), and the alignment in match[]. */
++static int rc_align(struct rc *r, int c, int ox, int oy, struct span *sp)
++{
++  const int *src = r->src;
++  const unsigned char *kind = r->kind;
++  struct sglyph *g = r->g;
++  int n = r->n, srclen = r->srclen, slack = r->slack;
 +  int aL = -1, pL = -1, aR = -1, pR = -1;
-+  for (int k = 0; k < e.nglues; k++)
++  for (int k = 0; k < r->nglues; k++)
 +  {
-+    int a = glues[k].a;
++    int a = r->glues[k].a;
 +    /* a word starts there: after a space, a visible character or a
 +       command name (not &, {, $, \( ...) */
-+    if (a <= 0 || a >= srclen || kind[a - 1] != CH_SPACE || kind[a] == CH_SPACE)
++    if (a <= 0 || a >= srclen || kind[a - 1] != CH_SPACE || kind[a] == CH_SPACE ||
++        kind[a] == CH_COMMENT)
 +      continue;
 +    if (kind[a] == CH_OTHER &&
 +        !(src[a] == '\\' && a + 1 < srclen && is_letter_cp(src[a + 1])))
 +      continue;
-+    int l = seg_of_point(lines, e.nlines, glues[k].x, glues[k].y, slack);
++    int l = seg_of_point(r->lines, r->nlines, r->glues[k].x, r->glues[k].y, slack);
 +    if (l < 0) continue;
 +    int p = 0;
-+    while (p < n && (g[p].line < l || (g[p].line == l && (g[p].x0 + g[p].x1) / 2 < glues[k].x)))
++    while (p < n && (g[p].line < l || (g[p].line == l && (g[p].x0 + g[p].x1) / 2 < r->glues[k].x)))
 +      p++;
 +    /* several records with the same character: the last one in reading
 +       order is at the word */
@@ -1779,8 +2019,8 @@ index 3f0b8f5..80aacae 100644
 +    if (a > c && (aR < 0 || a < aR || (a == aR && p > pR))) { aR = a; pR = p; }
 +  }
 +  /* anchors must agree with each other and be near the line that SyncTeX
-+     found (the interpolated point *x, *y) */
-+  int l0 = seg_of_point(lines, e.nlines, *x, *y, slack);
++     found */
++  int l0 = seg_of_point(r->lines, r->nlines, ox, oy, slack);
 +  #define GLINE(p) ((p) < n ? g[p].line : (n > 0 ? g[n - 1].line : -1))
 +  if (aL >= 0 && aR >= 0 && pR < pL) { aL = aR = -1; }
 +  if (l0 >= 0 && aL >= 0 && abs(GLINE(pL) - l0) > 2) aL = -1;
@@ -1788,7 +2028,6 @@ index 3f0b8f5..80aacae 100644
 +  /* the part of the source and of the stream to align: with one anchor,
 +     the stream from (or up to) the line next to it */
 +  int s0 = aL >= 0 ? aL : 0, s1 = aR >= 0 ? aR : srclen;
-+  int span = s1 - s0;
 +  int q0, q1;
 +  if (aL >= 0) q0 = pL;
 +  else if (aR >= 0)
@@ -1809,34 +2048,34 @@ index 3f0b8f5..80aacae 100644
 +  #undef GLINE
 +  if (q0 < 0) q0 = 0;
 +  if (q1 > n) q1 = n;
-+  if (dbg)
-+    fprintf(stderr, "[caret] line %d col %d: c %d, anchors %d@%d %d@%d, stream %d..%d\n",
-+            line, col, c, aL, pL, aR, pR, q0, q1);
 +  if (aL < 0 && aR < 0)
 +  {
-+    /* no interword records (e.g. a listing): the line of the interpolated
++    /* no interword records (e.g. a listing, a picture): the line of the
 +       point, and the lines before and after it, against the source line */
-+    if (l0 < 0) goto fail;
-+    s0 = source->offsets[li];
-+    s1 = line_end;
-+    span = s1 - s0;
++    if (l0 < 0) return 0;
++    int li = rc_line_of(r, c);
++    s0 = r->source->offsets[li];
++    s1 = (li + 1 < r->source->nlines) ? r->source->offsets[li + 1] - 1 : srclen;
 +    q0 = 0;
 +    while (q0 < n && g[q0].line < l0 - 1) q0++;
 +    q1 = q0;
 +    while (q1 < n && g[q1].line <= l0 + 1) q1++;
-+    if (dbg)
-+      fprintf(stderr, "[caret] no anchors: line box %d, source %d..%d, stream %d..%d\n",
-+              l0, s0, s1, q0, q1);
 +  }
++  *sp = (struct span){s0, s1, q0, q1, aL, pL, aR, pR, ox, oy};
++  if (r->dbg)
++    fprintf(stderr, "[caret] c %d: anchors %d@%d %d@%d, source %d..%d, stream %d..%d\n",
++            c, aL, pL, aR, pR, s0, s1, q0, q1);
++  int span = s1 - s0;
 +  if (q1 <= q0 || span <= 0 || span > 2000 || q1 - q0 > 4000)
-+    goto fail;
++    return 0;
++  if (s0 == r->ks0 && s1 == r->ks1 && q0 == r->kq0 && q1 == r->kq1)
++    return 1;    /* the same alignment as before */
 +
-+  /* longest common subsequence of the candidate characters and the glyphs */
-+  /* every character that is not a space may make a glyph: text with weight
-+     2, markup (command names, braces, comments) with weight 1, so that it
-+     matches only where it is printed (a listing, \verb) */
++  /* longest common subsequence of the characters and the glyphs: text
++     with weight 2, markup (command names, braces, comments) with weight 1,
++     so that it matches only where it is printed (a listing, \verb) */
++  int *order = r->order;
 +  int ns = 0;
-+  order = malloc(sizeof(int) * (span + 1));
 +  for (int i = s0; i < s1; i++) if (kind[i] != CH_SPACE) order[ns++] = i;
 +  int ng = q1 - q0;
 +  /* best[i][j]: best score of the first i characters and j glyphs;
@@ -1844,10 +2083,14 @@ index 3f0b8f5..80aacae 100644
 +     its weight, and 1 more when it continues a match of the character
 +     before it in the source on the glyph before it (text is contiguous). */
 +  long cells = (long)(ns + 1) * (ng + 1);
-+  dp = malloc(sizeof(int) * cells * 2);
-+  match = malloc(sizeof(int) * (srclen + 1));
-+  if (!order || !dp || !match) goto fail;
-+  int *run = dp + cells;
++  if (cells * 2 > r->dpcap)
++  {
++    free(r->dp);
++    r->dp = malloc(sizeof(int) * cells * 2);
++    r->dpcap = r->dp ? cells * 2 : 0;
++    if (!r->dp) return 0;
++  }
++  int *dp = r->dp, *run = dp + cells;
 +  #define BEST(i, j) dp[(long)(i) * (ng + 1) + (j)]
 +  #define RUN(i, j) run[(long)(i) * (ng + 1) + (j)]
 +  enum { NONE = -1000000 };
@@ -1856,18 +2099,19 @@ index 3f0b8f5..80aacae 100644
 +    {
 +      if (i == 0 || j == 0) { BEST(i, j) = 0; RUN(i, j) = NONE; continue; }
 +      int w = kind[order[i - 1]] == CH_CAND ? 2 : 1;
-+      int r = NONE;
-+      if (match_ok(ctx, &glyphs[g[q0 + j - 1].index], src[order[i - 1]], w))
++      int rr = NONE;
++      if (match_ok(r->ctx, &r->glyphs[g[q0 + j - 1].index], src[order[i - 1]], w))
 +      {
-+        r = BEST(i - 1, j - 1) + w;
++        rr = BEST(i - 1, j - 1) + w;
 +        if (i > 1 && order[i - 2] == order[i - 1] - 1 && RUN(i - 1, j - 1) > NONE &&
-+            RUN(i - 1, j - 1) + w + 1 > r)
-+          r = RUN(i - 1, j - 1) + w + 1;
++            RUN(i - 1, j - 1) + w + 1 > rr)
++          rr = RUN(i - 1, j - 1) + w + 1;
 +      }
-+      RUN(i, j) = r;
++      RUN(i, j) = rr;
 +      int b = BEST(i - 1, j) > BEST(i, j - 1) ? BEST(i - 1, j) : BEST(i, j - 1);
-+      BEST(i, j) = r > b ? r : b;
++      BEST(i, j) = rr > b ? rr : b;
 +    }
++  int *match = r->match;
 +  for (int i = 0; i < srclen; i++) match[i] = -1;
 +  {
 +    int i = ns, j = ng, in_run = 0;
@@ -1889,88 +2133,302 @@ index 3f0b8f5..80aacae 100644
 +  }
 +  #undef BEST
 +  #undef RUN
-+  if (dbg)
-+  {
-+    fprintf(stderr, "   ns %d ng %d best %d; source:", ns, ng, dp[(long)ns * (ng + 1) + ng]);
-+    for (int i = s0; i < s1 && i < s0 + 60; i++) fputc(src[i] < 128 ? src[i] : '?', stderr);
-+    fprintf(stderr, "\n");
++  /* the anchors themselves: the word start is at the anchor's glyph */
++  if (aR >= 0 && pR < n && match[aR] < 0 && kind[aR] == CH_CAND) match[aR] = pR;
++  r->ks0 = s0; r->ks1 = s1; r->kq0 = q0; r->kq1 = q1;
++  if (r->dbg)
 +    for (int i = s0; i < s1; i++)
 +      if (match[i] >= 0)
 +        fprintf(stderr, "   src %d '%c' -> glyph %d line %d x %d\n", i,
 +                src[i] < 128 ? src[i] : '?', match[i], g[match[i]].line, g[match[i]].x0);
-+    for (int j = q0; j < q1 && j < q0 + 400; j += 1)
-+      if (j == q0 || g[j].line != g[j - 1].line)
-+        fprintf(stderr, "   stream %d starts line %d (y %d)\n", j, g[j].line, segs[g[j].line].y);
-+  }
-+  /* the anchors themselves: the word start is at the anchor's glyph */
-+  if (aR >= 0 && pR < n && match[aR] < 0 && kind[aR] == CH_CAND) match[aR] = pR;
++  return 1;
++}
 +
-+  int gx, gl;
-+  if (c < s0 || c > s1) goto fail;
-+  if (c < srclen && match[c] >= 0)
-+  { gx = g[match[c]].x0; gl = g[match[c]].line; }
-+  else
++static int is_struct_char(int ch)
++{
++  return ch == '$' || ch == '{' || ch == '}' || ch == '^' || ch == '_' || ch == '&';
++}
++
++struct tok { int s, e; };
++
++/* commands that print nothing of their own */
++static int is_silent_cmd(const int *s, int len)
++{
++  static const char *names[] = {
++    "begin", "end", "label", "usepackage", "RequirePackage", "documentclass",
++    "newcommand", "renewcommand", "providecommand", "newenvironment",
++    "renewenvironment", "setlength", "addtolength", "color", "pagestyle",
++    "thispagestyle", "bibliographystyle", "addbibresource", "vspace", "hspace",
++    "setcounter", "addtocounter", "centering", "raggedright", "raggedleft",
++    "noindent", "indent", "par", "newline", "linebreak", "pagebreak", "newpage",
++    "clearpage", "smallskip", "medskip", "bigskip", "quad", "qquad", "displaystyle",
++    "textstyle", "scriptstyle", "limits", "nolimits", "nonumber", "notag",
++    "small", "large", "Large", "LARGE", "huge", "Huge", "footnotesize", "tiny",
++    "scriptsize", "normalsize", "bfseries", "itshape", "ttfamily", "rmfamily",
++    "sffamily", "mdseries", "upshape", "slshape", "scshape", "em", "protect",
++    "relax", "ignorespaces", "unskip", "allowbreak", "nobreak", "hfill", "vfill",
++    "hfil", "vfil", "strut", "phantom", "hphantom", "vphantom", "textbf",
++    "textit", "texttt", "textrm", "textsf", "textsc", "emph", "underline",
++    "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathcal", "mathbb",
++    "text", "mbox", "makebox", "fbox", "left", "right", "big", "Big", "bigg", "Bigg",
++    "caption", "section", "subsection", "subsubsection", "paragraph", NULL };
++  for (int k = 0; names[k]; k++)
 +  {
-+    /* between the nearest characters with a glyph */
-+    int b = c - 1, f = c + 1;
-+    while (b >= s0 && match[b] < 0) b--;
-+    while (f < s1 && match[f] < 0) f++;
-+    if (f >= s1 && aR >= 0 && pR < n) f = -2;      /* the right anchor */
-+    int gb = (b >= s0) ? match[b] : (aL >= 0 ? pL - 1 : -1);
-+    int gf = (f >= 0 && f < s1) ? match[f] : (f == -2 ? pR : -1);
-+    if (gb < 0 && gf < 0) goto fail;
-+    /* glyphs between them that no source character took */
-+    int free_glyphs = (gb >= 0 && gf >= 0) ? gf - gb - 1 : 0;
-+    int space_before = 0;
-+    for (int i = (b >= s0 ? b + 1 : s0); i < c; i++) if (kind[i] == CH_SPACE) space_before = 1;
-+    if (free_glyphs > 0 && g[gb].line == g[gf].line)
-+    {
-+      /* e.g. \ref{...}: the characters between share the glyphs between,
-+         in proportion */
-+      int cb = b >= s0 ? b : s0 - 1, cf = (f >= 0 && f < s1) ? f : s1;
-+      int k = cf - cb - 1;
-+      double fi = gb + 1 + (double)(c - cb - 1) * free_glyphs / (k > 0 ? k : 1);
-+      int i_ = (int)fi;
-+      if (i_ < gb + 1) i_ = gb + 1;
-+      if (i_ > gf - 1) i_ = gf - 1;
-+      double t_ = fi - i_;
-+      if (t_ < 0) t_ = 0;
-+      if (t_ > 1) t_ = 1;
-+      gx = g[i_].x0 + (int)(t_ * (g[i_].x1 - g[i_].x0));
-+      gl = g[i_].line;
-+    }
-+    else if (gb >= 0 && (!space_before || gf < 0 || (c < srclen && kind[c] == CH_SPACE)))
-+    { gx = g[gb].x1; gl = g[gb].line; }
-+    else
-+    { gx = g[gf].x0; gl = g[gf].line; }
++    int l = (int)strlen(names[k]);
++    if (l != len) continue;
++    int i = 0;
++    while (i < l && s[i] == (unsigned char)names[k][i]) i++;
++    if (i == l) return 1;
 +  }
++  return 0;
++}
++
++/* the length of the command name of the token src[i..j) */
++static int k_end_name(const int *s, int i, int j)
++{
++  int k = i + 1;
++  while (k < j && is_letter_cp(s[k])) k++;
++  return k - i - 1;
++}
++
++/* The parts of src[a..b) that may print something of their own: command
++   names (with the name argument of \ref, \includegraphics ...) and other
++   characters; not spaces, comments, braces, $, ^, _ */
++static int rc_tokens(const struct rc *r, int a, int b, struct tok *t, int max)
++{
++  const int *s = r->src;
++  int n = 0, i = a;
++  while (i < b && n < max)
++  {
++    int k = r->kind[i], ch = s[i];
++    if (k == CH_SPACE || k == CH_COMMENT || ch == '\n' || is_struct_char(ch)) { i++; continue; }
++    if (ch == '\\' && i + 1 < b)
++    {
++      int d = s[i + 1];
++      if (is_letter_cp(d))
++      {
++        int j = i + 1;
++        while (j < b && is_letter_cp(s[j])) j++;
++        if (is_markup_arg_cmd(s + i + 1, j - i - 1))
++        {
++          int m = j;
++          while (m < b && (s[m] == ' ' || s[m] == '*')) m++;
++          if (m < b && s[m] == '[')
++          {
++            while (m < b && s[m] != ']' && s[m] != '\n') m++;
++            if (m < b && s[m] == ']') m++;
++          }
++          if (m < b && s[m] == '{')
++          {
++            int depth = 0;
++            while (m < b)
++            {
++              if (s[m] == '{') depth++;
++              else if (s[m] == '}' && --depth == 0) { m++; break; }
++              else if (s[m] == '\n') break;
++              m++;
++            }
++            j = m;
++          }
++        }
++        if (!is_silent_cmd(s + i + 1, k_end_name(s, i, j)))
++          t[n++] = (struct tok){i, j};
++        i = j;
++        continue;
++      }
++      /* \( \) \[ \] \, \; \! \\ \  and the like print nothing */
++      if (d < 128 && strchr("()[],;:!> \\/", d)) { i += 2; continue; }
++      t[n++] = (struct tok){i, i + 2};
++      i += 2;
++      continue;
++    }
++    t[n++] = (struct tok){i, i + 1};
++    i++;
++  }
++  return n;
++}
++
++/* the box of glyphs h0..h1 (stream indices) that are on the line of h0
++   (or of h1 with from_end); *line: that line */
++static void rc_glyph_box(const struct rc *r, int h0, int h1, int from_end,
++                         synctex_box *b, int *line)
++{
++  int l = r->g[from_end ? h1 : h0].line, first = 1;
++  for (int j = h0; j <= h1; j++)
++  {
++    if (r->g[j].line != l) continue;
++    const synctex_glyph *q = &r->glyphs[r->g[j].index];
++    int y0 = q->y0, y1 = q->y1;
++    if (q->font || y1 <= y0) { y0 = segs[l].y - segs[l].h; y1 = segs[l].y + segs[l].d; }
++    if (first) { *b = (synctex_box){q->x0, y0, q->x1, y1}; first = 0; continue; }
++    if (q->x0 < b->x0) b->x0 = q->x0;
++    if (q->x1 > b->x1) b->x1 = q->x1;
++    if (y0 < b->y0) b->y0 = y0;
++    if (y1 > b->y1) b->y1 = y1;
++  }
++  *line = l;
++}
++
++/* a group: source src[s..e) on glyphs h0..h1 (stream indices) */
++struct grp { int s, e, h0, h1; };
++
++/* c in (or at the end of) a group: the caret at its start (or end), and
++   its box */
++static int rc_group_caret(struct rc *r, int c, const struct grp *G, int ngr,
++                          int *gx, int *gl, synctex_box *box, int *has_box)
++{
++  for (int pass = 0; pass < 2; pass++)
++    for (int k = 0; k < ngr; k++)
++      if (pass == 0 ? (c >= G[k].s && c < G[k].e) : c == G[k].e)
++      {
++        rc_glyph_box(r, G[k].h0, G[k].h1, pass, box, gl);
++        *gx = pass == 0 ? box->x0 : box->x1;
++        *has_box = 1;
++        return 1;
++      }
++  return 0;
++}
++
++/* the caret of character c with the alignment of sp */
++static int rc_place(struct rc *r, int c, const struct span *sp,
++                    int *x, int *y, int *h, int *d, synctex_box *box, int *has_box)
++{
++  const unsigned char *kind = r->kind;
++  const struct sglyph *g = r->g;
++  const int *match = r->match;
++  int s0 = sp->s0, s1 = sp->s1, n = r->n, srclen = r->srclen;
++  int gx, gl;
++  *has_box = 0;
++  if (c < s0 || c > s1) return 0;
++  if (c < srclen && match[c] >= 0)
++  { gx = g[match[c]].x0; gl = g[match[c]].line; goto done; }
++  /* between the nearest characters with a glyph */
++  int b = c - 1, f = c + 1;
++  while (b >= s0 && match[b] < 0) b--;
++  while (f < s1 && match[f] < 0) f++;
++  if (f >= s1 && sp->aR >= 0 && sp->pR < n) f = -2;      /* the right anchor */
++  int gb = (b >= s0) ? match[b] : (sp->aL >= 0 ? sp->pL - 1 : -1);
++  int gf = (f >= 0 && f < s1) ? match[f] : (f == -2 ? sp->pR : -1);
++  if (gb < 0 && gf < 0)
++  {
++    /* nothing of the source near c has a glyph (e.g. \includegraphics alone
++       on its line): the parts of the source line take the glyphs at the
++       point of SyncTeX, one each */
++    int li = rc_line_of(r, c);
++    int a = r->source->offsets[li];
++    int z = (li + 1 < r->source->nlines) ? r->source->offsets[li + 1] - 1 : srclen;
++    struct tok t[64];
++    struct grp G[64];
++    int nt = rc_tokens(r, a, z, t, 64);
++    int l0 = seg_of_point(r->lines, r->nlines, sp->ox, sp->oy, r->slack);
++    if (nt <= 0 || l0 < 0) return 0;
++    int h = sp->q0;
++    while (h < sp->q1 && (g[h].line != l0 || g[h].x1 <= sp->ox + r->slack / 2)) h++;
++    int m = 0;
++    while (m < nt && h + m < sp->q1 && g[h + m].line == l0) m++;
++    if (m == 0) return 0;
++    for (int k = 0; k < m; k++) G[k] = (struct grp){t[k].s, t[k].e, h + k, h + k};
++    if (rc_group_caret(r, c, G, m, &gx, &gl, box, has_box))
++      goto done;
++    if (c < G[0].s) { gx = g[h].x0; gl = g[h].line; goto done; }
++    if (c >= G[m - 1].e) { gx = g[h + m - 1].x1; gl = g[h + m - 1].line; goto done; }
++    for (int k = 0; k + 1 < m; k++)
++      if (c >= G[k].e && c < G[k + 1].s)
++      { gx = g[G[k + 1].h0].x0; gl = g[G[k + 1].h0].line; goto done; }
++    return 0;
++  }
++  int lo = b >= s0 ? b + 1 : s0, hi = (f >= 0 && f < s1) ? f : s1;
++  int space_before = 0;
++  for (int i = lo; i < c; i++) if (kind[i] == CH_SPACE) space_before = 1;
++  if (gb >= 0 && gf >= 0 && gf - gb - 1 > 0)
++  {
++    /* glyphs between them that no source character took: the groups */
++    struct tok t[64];
++    struct grp G[64];
++    int nt = rc_tokens(r, lo, hi, t, 64), nf = gf - gb - 1;
++    if (r->dbg)
++      fprintf(stderr, "   gap %d..%d glyphs %d..%d: %d parts, %d glyphs\n", lo, hi, gb, gf, nt, nf);
++    if (nt > 0)
++    {
++      /* one glyph for each part (\alpha\beta): a group each; else one group */
++      int split = nt == nf, ngr = split ? nt : 1;
++      for (int k = 0; k < ngr; k++)
++        G[k] = split ? (struct grp){t[k].s, t[k].e, gb + 1 + k, gb + 1 + k}
++                         : (struct grp){t[0].s, t[nt - 1].e, gb + 1, gf - 1};
++      if (rc_group_caret(r, c, G, ngr, &gx, &gl, box, has_box))
++        goto done;
++      if (c < G[0].s)
++      {
++        if (!space_before) { gx = g[gb].x1; gl = g[gb].line; }
++        else { gx = g[G[0].h0].x0; gl = g[G[0].h0].line; }
++        goto done;
++      }
++      if (c > G[ngr - 1].e)
++      {
++        int sp_after = 0;
++        for (int i = G[ngr - 1].e; i < c; i++) if (kind[i] == CH_SPACE) sp_after = 1;
++        if (sp_after) { gx = g[gf].x0; gl = g[gf].line; }
++        else { gx = g[G[ngr - 1].h1].x1; gl = g[G[ngr - 1].h1].line; }
++        goto done;
++      }
++      /* between two parts: at the start of the next one */
++      for (int k = 0; k + 1 < ngr; k++)
++        if (c > G[k].e && c < G[k + 1].s)
++        { gx = g[G[k + 1].h0].x0; gl = g[G[k + 1].h0].line; goto done; }
++    }
++  }
++  if (gb >= 0 && (!space_before || gf < 0 || (c < srclen && kind[c] == CH_SPACE)))
++  { gx = g[gb].x1; gl = g[gb].line; }
++  else
++  { gx = g[gf].x0; gl = g[gf].line; }
++done:
 +  *x = gx;
 +  *y = segs[gl].y;
 +  *h = segs[gl].h;
 +  *d = segs[gl].d;
-+  free(kind); free(g); free(order); free(dp); free(match);
++  if (*has_box && box->y1 - box->y0 > *h + *d)
++  {
++    /* a picture: the caret as high as it */
++    *y = box->y1;
++    *h = box->y1 - box->y0;
++    *d = 0;
++  }
 +  return 1;
-+fail:
-+  free(kind); free(g); free(order); free(dp); free(match);
-+  return 0;
 +}
 +
-+int synctex_refine_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
-+                          int page, const synctex_glyph *glyphs, int nglyphs,
-+                          const synctex_source *source,
-+                          int *x, int *y, int *h, int *d)
++/* the caret of line, col (from first_line of the source window); x, y: in
++   the point that SyncTeX found, out the caret */
++static int rc_locate(struct rc *r, int line, int col, int *x, int *y, int *h, int *d,
++                     synctex_box *box, int *has_box)
 +{
-+  if (!stx || stx->last_tag <= 0)
++  *has_box = 0;
++  int li = line - r->source->first_line;
++  if (li < 0 || li >= r->source->nlines || col < 0)
 +    return 0;
-+  struct fwd_env e = {.tag = stx->last_tag, .line = stx->last_line,
-+                      .c = stx->target_column};
++  int line_end = (li + 1 < r->source->nlines) ? r->source->offsets[li + 1] - 1 : r->srclen;
++  int c = r->source->offsets[li] + col;
++  if (c > line_end) c = line_end;
++  struct span sp;
++  if (!rc_align(r, c, *x, *y, &sp))
++    return 0;
++  return rc_place(r, c, &sp, x, y, h, d, box, has_box);
++}
++
++/* The point of SyncTeX for line, col: interpolated between the records of
++   the line. *in_text = 0: nothing of the line is in a line of text (e.g.
++   \begin{env}), the point is where the next text starts. */
++static int fwd_interp(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                      int tag, int line, int col, int *x, int *y, int *h, int *d,
++                      int *in_text)
++{
++  struct fwd_env e = {.tag = tag, .line = line, .c = col};
 +  walk_page(ctx, stx, buf, page, fwd_fn, &e);
++  *in_text = 1;
 +  if ((!e.has_f || !e.f.box) && !e.has_l && !e.has_r)
 +  {
-+    /* nothing of this line is in a line of text (e.g. \begin{env}): show
-+       the caret where the next text starts */
 +    if (!e.has_next)
 +      return 0;
++    *in_text = 0;
 +    *x = e.has_nprev ? e.nprev.r.point.x : e.next.bx0;
 +    *y = e.next.r.point.y;
 +    *h = e.next.bh;
@@ -2023,8 +2481,79 @@ index 3f0b8f5..80aacae 100644
 +  *y = base->r.point.y;
 +  *h = base->bh;
 +  *d = base->bd;
-+  refine_with_glyphs(ctx, stx, buf, page, e.tag, e.line, e.c, glyphs, nglyphs,
-+                     source, x, y, h, d);
++  return 1;
++}
++
++/* rc_locate; for a line with no text of its own (in_text 0, e.g.
++   \begin{figure} or a picture), only a group (the picture) is taken */
++static void rc_refine_point(struct rc *r, int in_text, int line, int col,
++                            int *x, int *y, int *h, int *d, synctex_box *b, int *hb)
++{
++  int tx = *x, ty = *y, th = *h, td = *d;
++  *hb = 0;
++  if (!rc_locate(r, line, col, &tx, &ty, &th, &td, b, hb))
++    return;
++  if (!in_text && !*hb)
++    return;
++  *x = tx; *y = ty; *h = th; *d = td;
++}
++
++int synctex_refine_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
++                          int page, const synctex_glyph *glyphs, int nglyphs,
++                          const synctex_source *source,
++                          int *x, int *y, int *h, int *d, synctex_caret_info *info)
++{
++  if (info) { info->has_box = 0; info->npts = 0; info->nboxes = 0; }
++  if (!stx || stx->last_tag <= 0)
++    return 0;
++  int tag = stx->last_tag, line = stx->last_line, col = stx->target_column;
++  int in_text;
++  if (!fwd_interp(ctx, stx, buf, page, tag, line, col, x, y, h, d, &in_text))
++    return 0;
++  struct rc r;
++  memset(&r, 0, sizeof(r));
++  int ok = rc_prepare(&r, ctx, stx, buf, page, tag, glyphs, nglyphs, source);
++  if (ok && col >= 0)
++  {
++    synctex_box b;
++    int hb = 0;
++    rc_refine_point(&r, in_text, line, col, x, y, h, d, &b, &hb);
++    if (info && hb) { info->has_box = 1; info->box = b; }
++  }
++  if (ok && info && info->debug && info->pts && info->boxes)
++  {
++    /* every character of the window */
++    for (int li = 0; li < source->nlines; li++)
++    {
++      int l = source->first_line + li;
++      int len = ((li + 1 < source->nlines) ? source->offsets[li + 1] - 1 : source->len) -
++                source->offsets[li];
++      for (int cc = 0; cc <= len && info->npts < info->cappts; cc++)
++      {
++        int px, py, ph, pd, it;
++        if (!fwd_interp(ctx, stx, buf, page, tag, l, cc, &px, &py, &ph, &pd, &it))
++          continue;
++        synctex_box b;
++        int hb = 0;
++        rc_refine_point(&r, it, l, cc, &px, &py, &ph, &pd, &b, &hb);
++        if (!it && !hb)
++          continue;
++        int bi = -1;
++        if (hb)
++        {
++          if (info->nboxes > 0 && !memcmp(&info->boxes[info->nboxes - 1], &b, sizeof(b)))
++            bi = info->nboxes - 1;
++          else if (info->nboxes < info->capboxes)
++          {
++            info->boxes[info->nboxes] = b;
++            bi = info->nboxes++;
++          }
++        }
++        info->pts[info->npts++] = (synctex_debug_point){l, cc, px, py, ph, pd, bi};
++      }
++    }
++  }
++  rc_free(&r);
 +  return 1;
 +}
 +
@@ -2160,7 +2689,7 @@ index 3f0b8f5..80aacae 100644
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..4023726 100644
+index cfff199..abbfc1b 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -2171,7 +2700,7 @@ index cfff199..4023726 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,29 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,46 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -2182,7 +2711,9 @@ index cfff199..4023726 100644
 +   right edge and baseline. With them and the text of the source line, the
 +   caret goes to the glyph of each visible character; without them (NULL),
 +   it is interpolated between the SyncTeX records. */
-+typedef struct { int x0, x1, y, gid; fz_font *font; } synctex_glyph;
++typedef struct { int x0, x1, y, gid; fz_font *font; int y0, y1; } synctex_glyph;
++/* x0, x1: left and right edge (advance); y: baseline; y0, y1: top and
++   bottom of the ink. A picture is a "glyph" with gid -1 and no font. */
 +/* Some lines of the source around the target line, joined with '\n', as
 +   Unicode characters (SyncTeX and the editor count characters, not bytes):
 +   line first_line starts at offsets[0], ... */
@@ -2191,10 +2722,25 @@ index cfff199..4023726 100644
 +  int len, first_line, nlines;
 +  int offsets[8];
 +} synctex_source;
++/* A part of the source that does not map 1:1 to glyphs (\infty, \ref{...},
++   \includegraphics...): the caret goes to its start and the viewer shows a
++   box around its glyphs (or picture). */
++typedef struct { int x0, y0, x1, y1; } synctex_box;
++/* Debug: the caret of every character of the source window */
++typedef struct { int line, col, x, y, h, d, box; } synctex_debug_point;
++typedef struct {
++  int has_box;                 /* out: box of the caret */
++  synctex_box box;
++  int debug;                   /* in: fill pts and boxes */
++  synctex_debug_point *pts;    /* in: arrays of the caller; out: counts */
++  int npts, cappts;
++  synctex_box *boxes;
++  int nboxes, capboxes;
++} synctex_caret_info;
 +int synctex_refine_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
 +                          int page, const synctex_glyph *glyphs, int nglyphs,
 +                          const synctex_source *source,
-+                          int *x, int *y, int *h, int *d);
++                          int *x, int *y, int *h, int *d, synctex_caret_info *info);
 +/* Reverse search with column. Returns 1 and calls editor_synctex. */
 +int synctex_scan_column(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
 +                        const char *doc_dir, unsigned page, int x, int y);
