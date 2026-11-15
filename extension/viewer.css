@@ -134,3 +134,15 @@
   background: rgba(255,255,255,.75); padding: 0 1px; white-space: nowrap; }
 .olive-caret.olive-caret-hidden { visibility: hidden; }
 .olive-debug-el-nosrc { border-style: dashed; }
+
+/* quick edit: the edit box of a field, under the double-clicked text */
+.olive-field { position: absolute; z-index: 5; margin-top: 2px; display: flex; flex-direction: column;
+  align-items: flex-start; gap: 2px; }
+.olive-field input {
+  all: unset; box-sizing: border-box; font: 13px/1.4 ui-monospace, monospace !important;
+  background: #fff !important; color: #111 !important; padding: 3px 6px !important;
+  border: 1.5px solid #e8590c !important; border-radius: 4px !important;
+  box-shadow: 0 3px 10px rgba(0,0,0,.25); min-width: 8ch;
+}
+.olive-field-hint { font: 10px/1.2 system-ui, sans-serif; color: #fff; background: rgba(0,0,0,.65);
+  padding: 1px 5px; border-radius: 3px; white-space: nowrap; }

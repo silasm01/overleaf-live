@@ -1,9 +1,9 @@
-From d4236e1114fb7ab12f2ee53407724fffc95c6f6f Mon Sep 17 00:00:00 2001
+From 7b9c28385a17d72e92f19b187d1a069248e07c7d Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  commands, .tex in -I paths, TeX Live pictures, SyncTeX with columns, caret on
- the glyphs, TikZ elements
+ the glyphs, TikZ elements, quick edit fields
 
 ---
  src/dvi/dvi_prim.c                |    4 +-
@@ -17,10 +17,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  105 +-
  src/frontend/editor.h             |   34 +
  src/frontend/engine_tex.c         |  162 ++-
- src/frontend/main.c               |  905 ++++++++++++++
- src/frontend/synctex.c            | 1908 ++++++++++++++++++++++++++++-
- src/frontend/synctex.h            |   97 ++
- 14 files changed, 3446 insertions(+), 61 deletions(-)
+ src/frontend/main.c               |  974 +++++++++++++
+ src/frontend/synctex.c            | 2260 ++++++++++++++++++++++++++++-
+ src/frontend/synctex.h            |  114 ++
+ 14 files changed, 3884 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -1059,10 +1059,10 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..be3745d 100644
+index c202294..9306482 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,711 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,778 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1638,6 +1638,73 @@ index c202294..be3745d 100644
 +  return done;
 +}
 +
++static int field_load(void *env, const char *path, int len, synctex_file *f)
++{
++  struct persistent_state *ps = env;
++  return caret_file(ps->ctx, ps->doc_path, path, len, f);
++}
++
++static void field_unload(void *env, synctex_file *f)
++{
++  struct persistent_state *ps = env;
++  caret_file_free(ps->ctx, f);
++}
++
++static void print_sexp_string(const char *s)
++{
++  putchar('"');
++  for (; *s; s++)
++  {
++    if (*s == '"' || *s == '\\') { putchar('\\'); putchar(*s); }
++    else if (*s == '\n') fputs("\\n", stdout);
++    else putchar(*s);
++  }
++  putchar('"');
++}
++
++/* quick edit: a double-click on text in a field (the smallest $...$, {...}
++   or [...] around the clicked character): on stdout
++     (synctex-field "path" l0 c0 l1 c1 x0 y0 x1 y1 "text")
++   (lines from 1, columns from 0; the box of the clicked glyph, in points),
++   then the editor goes to its start. Returns 0 if there is no field. */
++static int field_click(struct persistent_state *ps, ui_state *ui, int page, int x, int y)
++{
++  int ng = 0, ne = 0;
++  synctex_element *els = NULL;
++  synctex_glyph *glyphs = page_scan(ps->ctx, ui->eng, page, &ng, &els, &ne);
++  fz_buffer *sbuf;
++  synctex_t *stx = send(synctex, ui->eng, &sbuf);
++  synctex_resolve_elements(ps->ctx, stx, sbuf, page, els, ne);
++  static synctex_field_t f;
++  int ok = stx && synctex_field(ps->ctx, stx, sbuf, page, glyphs, ng, els, ne, x, y,
++                                main_file_name(ps), field_load, field_unload, ps, &f);
++  fz_free(ps->ctx, els);
++  drop_glyphs(ps->ctx, glyphs, ng);
++  if (!ok)
++    return 0;
++  /* only source files: not a file that the run writes (e.g. main.luaout1,
++     the output of a Lua module) */
++  const char *ext = strrchr(f.file, '.');
++  if (!ext || (strcmp(ext, ".tex") && strcmp(ext, ".sty") && strcmp(ext, ".cls") &&
++               strcmp(ext, ".ltx")))
++    return 0;
++  float fs = send(scale_factor, ui->eng);
++  char full[2048];
++  if (f.file[0] == '/')
++    snprintf(full, sizeof full, "%s", f.file);
++  else
++    snprintf(full, sizeof full, "%s/%s", ps->doc_path, f.file);
++  printf("(synctex-field ");
++  print_sexp_string(full);
++  printf(" %d %d %d %d %.2f %.2f %.2f %.2f ", f.l0, f.c0, f.l1, f.c1,
++         fs * f.box.x0, fs * f.box.y0, fs * f.box.x1, fs * f.box.y1);
++  print_sexp_string(f.text);
++  printf(")\n");
++  fprintf(stderr, "[synctex scan] field %s:%d:%d-%d:%d \"%s\"\n", f.file, f.l0, f.c0, f.l1, f.c1, f.text);
++  editor_synctex(ps->doc_path, f.file, (int)strlen(f.file), f.l0, f.c0);
++  return 1;
++}
++
 +/* the caret of the last forward search (x, y: the point of SyncTeX), on
 +   stdout, in points:
 +     (synctex-target page x y height depth [box-x0 box-y0 box-x1 box-y1 [element]])
@@ -1774,7 +1841,7 @@ index c202294..be3745d 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1622,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1689,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1900,7 +1967,7 @@ index c202294..be3745d 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +1893,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +1960,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -1920,7 +1987,7 @@ index c202294..be3745d 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +1921,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +1988,37 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -1942,7 +2009,9 @@ index c202294..be3745d 100644
 +      {
 +        float f = 1 / send(scale_factor, ui->eng);
 +        int sx = f * cmd.synctex_scan.x, sy = f * cmd.synctex_scan.y;
-+        if (element_click(ps, ui, cmd.synctex_scan.page, sx, sy))
++        if (field_click(ps, ui, cmd.synctex_scan.page, sx, sy))
++          ;
++        else if (element_click(ps, ui, cmd.synctex_scan.page, sx, sy))
 +          ;
 +        else if (!synctex_scan_column(ps->ctx, stx, buf, ps->doc_path,
 +                                      cmd.synctex_scan.page, sx, sy))
@@ -1956,7 +2025,7 @@ index c202294..be3745d 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1995,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +2064,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1990,7 +2059,7 @@ index c202294..be3745d 100644
    }
  }
  
-@@ -1234,9 +2122,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +2191,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -2003,7 +2072,7 @@ index c202294..be3745d 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1353,6 +2244,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +2313,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -2018,7 +2087,7 @@ index c202294..be3745d 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +2304,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +2373,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -2030,7 +2099,7 @@ index c202294..be3745d 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2584,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2653,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -2039,7 +2108,7 @@ index c202294..be3745d 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..60aef55 100644
+index 3f0b8f5..9185277 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -2183,7 +2252,7 @@ index 3f0b8f5..60aef55 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +1004,1819 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +1004,2171 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -3929,8 +3998,25 @@ index 3f0b8f5..60aef55 100644
 +  }
 +}
 +
++static int scan_column_at(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
++                          unsigned page, int x, int y, int *ptag, int *pline, int *pcol);
++
 +int synctex_scan_column(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
 +                        const char *doc_dir, unsigned page, int x, int y)
++{
++  int tag, line, col;
++  if (!scan_column_at(ctx, stx, buf, page, x, y, &tag, &line, &col))
++    return 0;
++  const char *fname;
++  int len = get_input(buf, stx, tag - 1, &fname);
++  fprintf(stderr, "[synctex scan] page %d (%d,%d) -> tag %d line %d column %d\n",
++          page, x, y, tag, line, col);
++  synctex_editor(doc_dir, fname, len, line, col);
++  return 1;
++}
++
++static int scan_column_at(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
++                          unsigned page, int x, int y, int *ptag, int *pline, int *pcol)
 +{
 +  if (!stx || synctex_page_count(stx) <= page)
 +    return 0;
@@ -3996,15 +4082,350 @@ index 3f0b8f5..60aef55 100644
 +    if (col < 0) col = 0;
 +  }
 +
-+  const char *fname;
-+  int len = get_input(buf, stx, tag - 1, &fname);
-+  fprintf(stderr, "[synctex scan] page %d (%d,%d) -> tag %d line %d column %d\n",
-+          page, x, y, tag, line, col);
-+  synctex_editor(doc_dir, fname, len, line, col);
++  *ptag = tag;
++  *pline = line;
++  *pcol = col;
++  return 1;
++}
++
++/* ---------------- fields (quick edit) ----------------
++
++   A double-click on text: the source text of the smallest group around the
++   clicked character ($...$, {...}, [...]; in a key=value list, the value),
++   for an edit box. The character of the clicked glyph: for normal text by
++   the caret map of its line (the character whose caret is at the left edge
++   of the glyph); for text in a TikZ element (whose SyncTeX lines are those
++   of the picture's end) by aligning the glyphs of the element with the
++   characters of its source. */
++
++/* the glyph at x, y: index in glyphs, -1 if none */
++static int field_glyph(const synctex_glyph *g, int ng, int x, int y)
++{
++  int best = -1;
++  double best_d = 0;
++  int slack = 65536;
++  for (int i = 0; i < ng; i++)
++  {
++    if (!g[i].font) continue;
++    int y0 = g[i].y0 < g[i].y1 ? g[i].y0 : g[i].y - 7 * 65536;
++    int y1 = g[i].y0 < g[i].y1 ? g[i].y1 : g[i].y + 2 * 65536;
++    if (x < g[i].x0 - slack || x > g[i].x1 + slack || y < y0 - slack || y > y1 + slack)
++      continue;
++    double cx = (g[i].x0 + g[i].x1) / 2.0 - x, cy = (y0 + y1) / 2.0 - y;
++    double d = cx * cx + cy * cy;
++    if (best < 0 || d < best_d) { best = i; best_d = d; }
++  }
++  return best;
++}
++
++static int is_esc(const int *t, int p)
++{
++  int n = 0;
++  while (p > 0 && t[p - 1] == '\\') { n++; p--; }
++  return n & 1;
++}
++
++/* the field around offset p of the text: [*a, *b) */
++static int field_span(const int *t, int len, int p, int *a, int *b)
++{
++  int lo = p - 600 > 0 ? p - 600 : 0;
++  /* innermost unmatched { or [ before p */
++  int open = -1, oc = 0;
++  int dc = 0, db = 0;
++  for (int i = p - 1; i >= lo; i--)
++  {
++    int c = t[i];
++    if (c == '\n' && i > 0 && t[i - 1] == '\n') break;   /* a paragraph */
++    if ((c == '{' || c == '}' || c == '[' || c == ']') && is_esc(t, i)) continue;
++    if (c == '}') dc++;
++    else if (c == ']') db++;
++    else if (c == '{') { if (dc-- == 0) { open = i; oc = '{'; break; } }
++    else if (c == '[') { if (db-- == 0) { open = i; oc = '['; break; } }
++  }
++  /* math: an odd number of unescaped $ between the line start (or the
++     group) and p */
++  int ls = p;
++  while (ls > 0 && t[ls - 1] != '\n') ls--;
++  int from = open > ls ? open + 1 : ls, dollars = 0, last = -1;
++  for (int i = from; i < p; i++)
++    if (t[i] == '$' && !is_esc(t, i)) { dollars++; last = i; }
++  if (dollars & 1)
++  {
++    int e = p;
++    while (e < len && t[e] != '\n' && !(t[e] == '$' && !is_esc(t, e))) e++;
++    if (e < len && t[e] == '$')
++    {
++      *a = last + 1;
++      *b = e;
++      return *b > *a;
++    }
++  }
++  if (open < 0)
++    return 0;
++  int close = oc == '{' ? '}' : ']', d = 0, e = open + 1;
++  for (; e < len && e - open < 2000; e++)
++  {
++    int c = t[e];
++    if ((c == oc || c == close) && is_esc(t, e)) continue;
++    if (c == oc) d++;
++    else if (c == close) { if (d-- == 0) break; }
++  }
++  if (e >= len || t[e] != close)
++    return 0;
++  int s0 = open + 1, s1 = e;
++  /* a key=value list: the item of p, and its value */
++  int item0 = s0, item1 = s1, depth = 0;
++  for (int i = s0; i < s1; i++)
++  {
++    int c = t[i];
++    if (is_esc(t, i)) continue;
++    if (c == '{' || c == '[' || c == '(') depth++;
++    else if (c == '}' || c == ']' || c == ')') depth--;
++    else if (c == '$') { int j = i + 1; while (j < s1 && !(t[j] == '$' && !is_esc(t, j))) j++; i = j; }
++    else if (c == ',' && depth == 0) { if (i < p) item0 = i + 1; else { item1 = i; break; } }
++  }
++  if (item0 != s0 || item1 != s1)
++  {
++    s0 = item0; s1 = item1;
++    for (int i = s0; i < s1; i++)
++      if (t[i] == '=' && !is_esc(t, i)) { if (i < p) s0 = i + 1; break; }
++  }
++  while (s0 < s1 && (t[s0] == ' ' || t[s0] == '\n')) s0++;
++  while (s1 > s0 && (t[s1 - 1] == ' ' || t[s1 - 1] == '\n')) s1--;
++  if (p < s0 || p > s1 || s1 - s0 > 300)
++    return 0;
++  *a = s0;
++  *b = s1;
++  return s1 > s0;
++}
++
++int synctex_field(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                  const synctex_glyph *glyphs, int ng, const synctex_element *els, int ne,
++                  int x, int y, const char *main_file,
++                  synctex_load_fn load, synctex_free_fn unload, void *env, synctex_field_t *out)
++{
++  memset(out, 0, sizeof(*out));
++  int gi = field_glyph(glyphs, ng, x, y);
++  if (gi < 0)
++    return 0;
++  const synctex_glyph *cg = &glyphs[gi];
++  int gx = (cg->x0 + cg->x1) / 2, gy = cg->y;
++  synctex_file f;
++  int p = -1;
++  /* in a TikZ element? */
++  int ek = -1;
++  double ea = 0;
++  for (int i = 0; i < ne; i++)
++  {
++    const synctex_element *e = &els[i];
++    if (!e->has_box || gx < e->x0 || gx > e->x1 || gy < e->y0 || gy > e->y1)
++      continue;
++    double a = (double)(e->x1 - e->x0) * (e->y1 - e->y0);
++    if (ek < 0 || a < ea) { ek = i; ea = a; }
++  }
++  if (ek >= 0)
++  {
++    const synctex_element *e = &els[ek];
++    const char *name = e->file[0] ? e->file : main_file;
++    if (!load(env, name, (int)strlen(name), &f))
++      return 0;
++    snprintf(out->file, sizeof(out->file), "%s", name);
++    synctex_range r;
++    if (!synctex_element_range(&f, e, &r) || r.whole)
++    {
++      /* drawn by a macro: the whole environment, still a good place to look */
++      if (!synctex_element_range(&f, e, &r)) { unload(env, &f); return 0; }
++    }
++    int s0 = f.line_off[r.l0 - 1] + r.c0, s1 = f.line_off[r.l1 - 1] + r.c1;
++    if (s1 > f.len) s1 = f.len;
++    /* the glyphs of the element, in reading order */
++    int *gs = malloc(sizeof(int) * (ng + 1));
++    int n = 0;
++    for (int i = 0; i < ng; i++)
++    {
++      int cx = (glyphs[i].x0 + glyphs[i].x1) / 2;
++      if (glyphs[i].font && cx >= e->x0 && cx <= e->x1 &&
++          glyphs[i].y >= e->y0 && glyphs[i].y <= e->y1 + 3 * 65536)
++        gs[n++] = i;
++    }
++    /* insertion sort: by baseline (3pt bands), then x */
++    for (int i = 1; i < n; i++)
++    {
++      int v = gs[i], j = i - 1;
++      while (j >= 0)
++      {
++        const synctex_glyph *A = &glyphs[gs[j]], *B = &glyphs[v];
++        int band = abs(A->y - B->y) <= 3 * 65536;
++        if (band ? A->x0 > B->x0 : A->y > B->y) { gs[j + 1] = gs[j]; j--; }
++        else break;
++      }
++      gs[j + 1] = v;
++    }
++    int ns = s1 - s0;
++    unsigned char *kind = malloc(ns + 1);
++    classify_source(f.text + s0, ns, kind);
++    int *dp = NULL;
++    if (kind && n > 0 && n <= 24 && ns > 0)
++    {
++      /* a label (a few glyphs): the place in the source where its glyphs
++         are closest together. From each character that the first glyph
++         matches, the next glyphs take the next characters that they match
++         (at most 12 characters on); most glyphs, then the shortest span. */
++      int best_m = 0, best_span = 0, best_p = -1;
++      int pos[24], best_pos[24];
++      for (int st = 0; st < ns; st++)
++      {
++        int i = st, m = 0, first = -1, last = -1, pc = -1;
++        for (int j = 0; j < n; j++)
++        {
++          int k = (j == 0) ? st : i;
++          int lim = (j == 0) ? st + 1 : i + 12;
++          int found = -1;
++          for (; k < ns && k < lim; k++)
++            if (kind[k] == CH_CAND && glyph_matches(ctx, &glyphs[gs[j]], f.text[s0 + k]))
++            { found = k; break; }
++          if (found < 0) { if (j == 0) break; continue; }
++          if (first < 0) first = found;
++          last = found;
++          pos[m] = found;
++          m++;
++          if (gs[j] == gi) pc = found;
++          i = found + 1;
++        }
++        if (m == 0 || pc < 0) continue;
++        int span = last - first;
++        if (m > best_m || (m == best_m && span < best_span))
++        {
++          best_m = m; best_span = span; best_p = pc;
++          memcpy(best_pos, pos, sizeof(int) * m);
++        }
++      }
++      /* all glyphs must be there; one glyph must be the only such
++         character (a 1 in a K-map is not one of its minterms) */
++      if (best_p >= 0 && best_m == n)
++      {
++        int same = 0;
++        if (n == 1)
++          for (int k = 0; k < ns; k++)
++            if (kind[k] == CH_CAND && glyph_matches(ctx, &glyphs[gs[0]], f.text[s0 + k])) same++;
++        if (n > 1 || same == 1)
++        {
++          p = s0 + best_p;
++          /* the field must be what the label shows: all its characters on
++             glyphs of the label (a 1 in a K-map is not the field 15) */
++          int a, b;
++          if (field_span(f.text, f.len, p, &a, &b))
++            for (int k = a; k < b && p >= 0; k++)
++            {
++              if (kind[k - s0 < 0 || k - s0 >= ns ? 0 : k - s0] != CH_CAND) continue;
++              int hit = 0;
++              for (int q = 0; q < best_m; q++) if (s0 + best_pos[q] == k) hit = 1;
++              if (!hit) p = -1;
++            }
++        }
++      }
++    }
++    else
++    /* LCS of candidate characters and glyphs */
++    dp = malloc(sizeof(int) * (size_t)(ns + 1) * (n + 1));
++    if (dp && kind && n > 0 && ns > 0 && (long)(ns + 1) * (n + 1) < 4000000)
++    {
++      #define D(i, j) dp[(long)(i) * (n + 1) + (j)]
++      for (int i = 0; i <= ns; i++)
++        for (int j = 0; j <= n; j++)
++        {
++          if (!i || !j) { D(i, j) = 0; continue; }
++          int m = D(i - 1, j) > D(i, j - 1) ? D(i - 1, j) : D(i, j - 1);
++          if (kind[i - 1] == CH_CAND && glyph_matches(ctx, &glyphs[gs[j - 1]], f.text[s0 + i - 1]) &&
++              D(i - 1, j - 1) + 1 > m)
++            m = D(i - 1, j - 1) + 1;
++          D(i, j) = m;
++        }
++      /* from the end, a match first: a glyph takes the last character that
++         fits (in R=$R_1$ the R of the label is the one in math) */
++      for (int i = ns, j = n; i > 0 && j > 0;)
++      {
++        if (kind[i - 1] == CH_CAND && D(i, j) == D(i - 1, j - 1) + 1 &&
++            glyph_matches(ctx, &glyphs[gs[j - 1]], f.text[s0 + i - 1]))
++        {
++          if (gs[j - 1] == gi) { p = s0 + i - 1; break; }
++          i--; j--;
++        }
++        else if (D(i, j) == D(i - 1, j)) i--;
++        else j--;
++      }
++      #undef D
++    }
++    free(dp);
++    free(kind);
++    free(gs);
++  }
++  else
++  {
++    /* normal text: the caret map of the lines near the click */
++    int tag, line, col;
++    if (!scan_column_at(ctx, stx, buf, page, gx, gy, &tag, &line, &col))
++      return 0;
++    const char *name, *base;
++    int len = get_input(buf, stx, tag - 1, &name), blen, off = 0, nl;
++    if (synctex_input_alias(name, len, &base, &blen, &off, &nl)) { name = base; len = blen; }
++    if (!load(env, name, len, &f))
++      return 0;
++    snprintf(out->file, sizeof(out->file), "%.*s", len, name);
++    enum { CAP = 1024 };
++    static synctex_debug_point pts[CAP];
++    static synctex_box boxes[256];
++    synctex_caret_info info = {0};
++    info.pts = pts; info.cappts = CAP; info.boxes = boxes; info.capboxes = 256;
++    int lines[3], k = 0;
++    for (int l = line - 1; l <= line + 1; l++)
++      if (l + off >= 1 && l + off <= f.nlines) lines[k++] = l;
++    synctex_caret_map(ctx, stx, buf, page, glyphs, ng, tag, &f, lines, k, off, &info);
++    int best = -1;
++    double bd = 0;
++    for (int i = 0; i < info.npts; i++)
++    {
++      double dx = pts[i].x - cg->x0, dy = pts[i].y - cg->y;
++      if (fabs(dy) > 2 * 65536 || fabs(dx) > 65536) continue;
++      /* the character starts at the glyph: its caret is at the left edge,
++         and the caret after it is not */
++      double d = fabs(dx);
++      if (best < 0 || d < bd) { best = i; bd = d; }
++    }
++    if (best >= 0)
++      p = f.line_off[pts[best].line - 1] + pts[best].col;
++  }
++  if (p < 0)
++  {
++    unload(env, &f);
++    return 0;
++  }
++  int a, b;
++  if (!field_span(f.text, f.len, p, &a, &b))
++  {
++    unload(env, &f);
++    return 0;
++  }
++  el_pos(&f, a, &out->l0, &out->c0);
++  el_pos(&f, b, &out->l1, &out->c1);
++  int tl = 0;
++  for (int i = a; i < b && tl < (int)sizeof(out->text) - 5; i++)
++  {
++    int c = f.text[i];
++    if (c < 0x80) out->text[tl++] = (char)c;
++    else if (c < 0x800) { out->text[tl++] = 0xC0 | (c >> 6); out->text[tl++] = 0x80 | (c & 0x3F); }
++    else if (c < 0x10000) { out->text[tl++] = 0xE0 | (c >> 12); out->text[tl++] = 0x80 | ((c >> 6) & 0x3F); out->text[tl++] = 0x80 | (c & 0x3F); }
++    else { out->text[tl++] = 0xF0 | (c >> 18); out->text[tl++] = 0x80 | ((c >> 12) & 0x3F); out->text[tl++] = 0x80 | ((c >> 6) & 0x3F); out->text[tl++] = 0x80 | (c & 0x3F); }
++  }
++  out->text[tl] = 0;
++  out->box = (synctex_box){cg->x0, cg->y0 < cg->y1 ? cg->y0 : cg->y - 7 * 65536,
++                           cg->x1, cg->y0 < cg->y1 ? cg->y1 : cg->y + 2 * 65536};
++  out->ok = 1;
++  unload(env, &f);
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..178a8b3 100644
+index cfff199..60a5969 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -4015,7 +4436,7 @@ index cfff199..178a8b3 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,102 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,119 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -4116,6 +4537,23 @@ index cfff199..178a8b3 100644
 +                          int *x, int *y, int *h, int *d, synctex_caret_info *info);
 +/* The smallest element at x, y; -1 if none */
 +int synctex_element_at(const synctex_element *els, int nels, int x, int y);
++
++/* Quick edit: the field (source text) at x, y of page, see synctex_field
++   in synctex.c. load/unload read a source file (path relative to the
++   document). */
++typedef struct {
++  int ok;
++  int l0, c0, l1, c1;      /* the source text, lines from 1, columns from 0 */
++  synctex_box box;         /* the clicked glyph */
++  char file[512];          /* the source file, relative to the document */
++  char text[1300];         /* the source text (UTF-8) */
++} synctex_field_t;
++typedef int (*synctex_load_fn)(void *env, const char *path, int len, synctex_file *f);
++typedef void (*synctex_free_fn)(void *env, synctex_file *f);
++int synctex_field(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                  const synctex_glyph *glyphs, int ng, const synctex_element *els, int ne,
++                  int x, int y, const char *main_file,
++                  synctex_load_fn load, synctex_free_fn unload, void *env, synctex_field_t *out);
 +
  #endif // SYNCTEX_H_
 -- 

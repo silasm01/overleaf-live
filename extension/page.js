@@ -6,7 +6,8 @@
 //     made by collaborators;
 //   - the cursor position (for the caret in the live PDF);
 //   - the .bbl file of Overleaf's last compile (for biblatex).
-// content.js can ask it to move the cursor (reverse search).
+// content.js can ask it to move the cursor (reverse search), to select a
+// range, and to replace a range (quick edit).
 (() => {
   const TAG = "__overleafLive";
   let docId = null;
@@ -107,13 +108,20 @@
     return result;
   };
 
-  // move the cursor to line/column and show it (reverse search)
-  function gotoPosition(line, column) {
-    if (!view) return;
+  // line/column (line from 1) -> offset in the document
+  function offsetOf(line, column) {
     const doc = view.state.doc;
     const l = doc.line(Math.max(1, Math.min(line, doc.lines)));
-    const pos = Math.min(l.from + Math.max(0, column), l.to);
-    const spec = { selection: { anchor: pos } };
+    return Math.min(l.from + Math.max(0, column), l.to);
+  }
+
+  // move the cursor to line/column and show it (reverse search); with
+  // toLine/toColumn, select up to there (a quick-edit field)
+  function gotoPosition(line, column, toLine, toColumn) {
+    if (!view) return;
+    const pos = offsetOf(line, column);
+    const head = toLine ? offsetOf(toLine, toColumn) : pos;
+    const spec = { selection: { anchor: pos, head } };
     if (CM && CM.EditorView && CM.EditorView.scrollIntoView)
       spec.effects = CM.EditorView.scrollIntoView(pos, { y: "center" });
     else
@@ -130,6 +138,22 @@
       sendText();
       sendCursor(true);
     }
-    if (cmd === "goto" && evt.data.docId === docId) gotoPosition(evt.data.line, evt.data.column);
+    if (cmd === "goto" && evt.data.docId === docId)
+      gotoPosition(evt.data.line, evt.data.column, evt.data.toLine, evt.data.toColumn);
+    // quick edit: replace a field, if it still has the text it had
+    if (cmd === "replace") {
+      const d = evt.data;
+      let ok = false, why = "the file is not open in the editor";
+      if (view && d.docId === docId) {
+        const from = offsetOf(d.line, d.column), to = offsetOf(d.toLine, d.toColumn);
+        if (view.state.doc.sliceString(from, to) !== d.expect) why = "the text changed";
+        else {
+          view.dispatch({ changes: { from, to, insert: d.text },
+                          selection: { anchor: from, head: from + d.text.length } });
+          ok = true;
+        }
+      }
+      post({ kind: "replaced", ok, why, id: d.id });
+    }
   });
 })();

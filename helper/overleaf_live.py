@@ -53,6 +53,9 @@ Messages (JSON, one per WebSocket message)
      "boxes": [[x0, y0, x1, y1], ...]}       debug panel: every character near
                                              the cursor
     {"type": "goto", "path": p, "line": n, "column": n}   reverse search
+    {"type": "field", "path": p, "from": [line, col], "to": [line, col],
+     "box": [x0, y0, x1, y1], "text": s}     quick edit: the double-clicked
+                                             field (before its goto)
 
 SyncTeX: TeXpresso's engine (patched) writes the column next to the line
 in each SyncTeX record, so both directions work to about one character in
@@ -240,6 +243,7 @@ class Project:
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
         caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?( element)?\)$')
         back_re = re.compile(r'^\(synctex "(.*)" (-?\d+) (-?\d+)\)$')
+        field_re = re.compile(r'^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
             raw = await proc.stdout.readline()
@@ -273,6 +277,15 @@ class Project:
                 continue
             if line.startswith("(synctex-elements "):
                 await self.send(parse_elements(line))
+                continue
+            m = field_re.match(line)
+            if m:
+                rel = self.project_path(re.sub(r'\\(.)', r'\1', m[1]))
+                if rel:
+                    text = re.sub(r'\\(.)', lambda k: "\n" if k[1] == "n" else k[1], m[10])
+                    await self.send({"type": "field", "path": rel,
+                                     "from": [int(m[2]), int(m[3])], "to": [int(m[4]), int(m[5])],
+                                     "box": [float(m[i]) for i in range(6, 10)], "text": text})
                 continue
             m = back_re.match(line)
             if m:

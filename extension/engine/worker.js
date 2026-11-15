@@ -473,6 +473,9 @@ const appendRe = /^\(append out (\d+) "(.*)"\)$/;
 // "element": the box is a picture or a TikZ element (the viewer shows only the box)
 const caretRe = /^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?( element)?\)$/;
 const backRe = /^\(synctex "(.*)" (-?\d+) (-?\d+)\)$/;
+// (synctex-field "path" l0 c0 l1 c1 x0 y0 x1 y1 "text"): quick edit, the
+// source text of the double-clicked field (sent before its (synctex ...))
+const fieldRe = /^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"\)$/;
 const truncRe = /^\(truncate out (\d+)\)$/;
 const unescape = s => s.replace(/\\(.)/g, (_, c) => c === 'n' ? '\n' : c);
 
@@ -493,6 +496,12 @@ function onLine(run, line) {
     send(parseCaretDebug(line));
   } else if (line.startsWith('(synctex-elements ')) {
     send(parseElements(line));
+  } else if ((m = line.match(fieldRe))) {
+    let path = unescape(m[1]);
+    if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
+    const rel = safeRel(path);
+    if (rel) send({ type: 'field', path: rel, from: [+m[2], +m[3]], to: [+m[4], +m[5]],
+      box: [+m[6], +m[7], +m[8], +m[9]], text: unescape(m[10]) });
   } else if ((m = line.match(backRe))) {
     let path = unescape(m[1]);
     if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);

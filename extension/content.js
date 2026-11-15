@@ -36,6 +36,8 @@
   let caretTimer = null;
   let lastCursor = null;         // {path, line, column}: the editor cursor last sent
   let pendingGoto = null;        // reverse search waiting for a file to open
+  let pendingField = null;       // quick edit: the field of the last double-click
+  let scanPage = -1;             // the page of the last double-click
   let docId = null;              // the file open in the editor (Overleaf's id)
   let engine = "browser";        // "browser" (WebAssembly) or "wsl" (the helper); for all projects
 
@@ -275,6 +277,9 @@
     e.preventDefault();
     const sel = window.getSelection();
     if (sel) sel.removeAllRanges();
+    closeField();
+    pendingField = null;
+    scanPage = index;
     send({ type: "scan", page: index, x, y });
   });
 
@@ -287,7 +292,8 @@
 
   function gotoSource(msg) {
     if (detached) return;            // the editor tab does it
-    const cmd = { [TAG + "Cmd"]: "goto", line: msg.line, column: msg.column };
+    const cmd = { [TAG + "Cmd"]: "goto", line: msg.line, column: msg.column,
+                  toLine: msg.toLine, toColumn: msg.toColumn };
     if (docId && pathOf(docId) === msg.path) {
       window.postMessage({ ...cmd, docId }, location.origin);
       return;
@@ -539,6 +545,69 @@
   }).observe(document.body, { childList: true, subtree: true, characterData: true });
   attach();
   new ResizeObserver(() => { applyZoom(); checkView(); }).observe(scroller);
+
+  // --- quick edit -------------------------------------------------------
+  // A double-click on a field (the smallest $...$, {...} or [...] around the
+  // clicked character, e.g. R_1 in \comp{a}{b}{R=$R_1$}): the editor selects
+  // its source, and an edit box opens on the page. Enter writes the new text
+  // into the editor (page.js checks that the source is still the same),
+  // Escape or a click elsewhere closes the box.
+  let fieldEl = null;
+
+  function closeField() {
+    if (fieldEl) fieldEl.remove();
+    fieldEl = null;
+  }
+
+  function openField(f) {
+    closeField();
+    if (detached || scanPage < 0) return;   // the editor is in the other tab
+    const slot = slots()[scanPage];
+    if (!slot) return;
+    const box = document.createElement("div");
+    box.className = "olive-field";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = f.text;
+    input.spellcheck = false;
+    input.style.width = Math.max(8, Math.min(60, f.text.length + 3)) + "ch";
+    const hint = document.createElement("span");
+    hint.className = "olive-field-hint";
+    hint.textContent = "Enter: save · Esc: cancel";
+    box.append(input, hint);
+    const w = +slot.dataset.w || pageSize.w, h = +slot.dataset.h || pageSize.h;
+    box.style.left = (f.box[0] / w * 100) + "%";
+    box.style.top = (f.box[3] / h * 100) + "%";
+    slot.appendChild(box);
+    fieldEl = box;
+    for (const ev of ["mousedown", "dblclick", "wheel"]) box.addEventListener(ev, (e) => e.stopPropagation());
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Escape") { e.preventDefault(); closeField(); }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const text = input.value;
+        closeField();
+        if (text === f.text) return;
+        if (!docId || pathOf(docId) !== f.path) {
+          setStatus(`quick edit not saved: ${f.path} is not open in the editor`, false);
+          return;
+        }
+        window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: f.from[0], column: f.from[1],
+          toLine: f.to[0], toColumn: f.to[1], expect: f.text, text }, location.origin);
+      }
+    });
+    // the editor takes the focus when it opens the file and selects the
+    // field: in the first 3 s the box takes it back, later a blur closes it
+    const opened = Date.now();
+    input.addEventListener("blur", () => setTimeout(() => {
+      if (fieldEl !== box) return;
+      if (Date.now() - opened < 3000) input.focus();
+      else closeField();
+    }, 150));
+    // after the editor took the focus for the selection
+    setTimeout(() => { input.focus(); input.select(); }, 250);
+  }
 
   // --- the debug panel (Alt+Shift+G) -------------------------------------
   // Tools to check what the live preview does:
@@ -933,9 +1002,21 @@
       case "debug":
         dbg.log(msg.text);
         break;
-      case "goto":
-        gotoSource(msg);
+      case "field":
+        pendingField = msg;
         break;
+      case "goto": {
+        // a field: select it in the editor, and open the edit box on the page
+        const f = pendingField;
+        pendingField = null;
+        if (f && f.path === msg.path && f.from[0] === msg.line && f.from[1] === msg.column) {
+          gotoSource({ ...msg, toLine: f.to[0], toColumn: f.to[1] });
+          openField(f);
+        } else {
+          gotoSource(msg);
+        }
+        break;
+      }
     }
   }
 
@@ -1030,6 +1111,10 @@
         pendingGoto = null;
         setTimeout(() => window.postMessage(cmd, location.origin), 150);
       }
+      return;
+    }
+    if (msg.kind === "replaced") {
+      if (!msg.ok) setStatus(`quick edit not saved: ${msg.why}`, false);
       return;
     }
     if (msg.kind === "bbl") {
