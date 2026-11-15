@@ -133,3 +133,4 @@
 .olive-debug-el > span { position: absolute; left: 0; top: -9px; font: 8px/1 ui-monospace, monospace;
   background: rgba(255,255,255,.75); padding: 0 1px; white-space: nowrap; }
 .olive-caret.olive-caret-hidden { visibility: hidden; }
+.olive-debug-el-nosrc { border-style: dashed; }

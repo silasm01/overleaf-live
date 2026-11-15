@@ -704,26 +704,33 @@
       elLayer.className = "olive-debug-layer";
       let shown = 0;
       const seen = new Set();
+      let nosrc = 0;
+      const files = new Set();
       for (const e of msg.elements) {
-        if (e.box[0] < 0 || !e.src[0]) continue;   // draws nothing, or no source
+        if (e.box[0] < 0) continue;   // draws nothing
         const key = e.box.join(",");
         if (seen.has(key)) continue;
         seen.add(key);
+        // no source: TeX read it from a file that is not in the project
+        // (e.g. main-usage.tex, which the catalog's usage environment writes)
+        const known = !!e.src[0];
+        const color = known ? KIND_COLORS[e.kind] || "#555" : "#868e96";
         const b = document.createElement("div");
-        b.className = "olive-debug-el";
-        b.style.borderColor = KIND_COLORS[e.kind] || "#555";
+        b.className = "olive-debug-el" + (known ? "" : " olive-debug-el-nosrc");
+        b.style.borderColor = color;
         placeBox(b, slot, e.box);
         const tag = document.createElement("span");
-        tag.textContent = e.kind + e.src[0];
-        tag.style.color = KIND_COLORS[e.kind] || "#555";
+        tag.textContent = e.kind + (known ? e.src[0] : e.line);
+        tag.style.color = color;
         b.appendChild(tag);
         elLayer.appendChild(b);
         shown++;
+        if (!known) { nosrc++; files.add(e.file || "the main file"); }
       }
       slot.appendChild(elLayer);
       if (panel) panel.querySelector(".olive-debug-elinfo").textContent =
         `page ${msg.page + 1}: ${shown} element box${shown === 1 ? "" : "es"}` +
-        (msg.elements.length > shown ? ` (${msg.elements.length - shown} without a box or source)` : "");
+        (nosrc ? `; ${nosrc} grey: no source in the project (from ${[...files].join(", ")}), so the cursor cannot show them` : "");
     }
 
     function clearMap() {
