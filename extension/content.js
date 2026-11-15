@@ -553,6 +553,7 @@
     const logLines = [];
     let panel = null, mapOn = false, mapLayer = null, sentAt = 0, lastMap = null;
     let wholePage = false, mapPage = -1, pageTimer = null;
+    let elementsOn = false, elPage = -1, elTimer = null, elLayer = null, lastElements = null;
 
     function build() {
       panel = document.createElement("div");
@@ -571,6 +572,14 @@
           <div class="olive-debug-mapinfo"></div>
         </section>
         <section>
+          <label><input type="checkbox" class="olive-debug-elements"> Elements (TikZ)</label>
+          <div class="olive-debug-note">Boxes of the TikZ elements on the page of the caret:
+            <span style="color:#c92a2a">pictures</span>, <span style="color:#1971c2">paths</span>,
+            <span style="color:#2f9e44">nodes</span> and <span style="color:#ae3ec9">to[...] parts</span>.
+            The label is the source line.</div>
+          <div class="olive-debug-elinfo"></div>
+        </section>
+        <section>
           <div class="olive-debug-title">Caret</div>
           <pre class="olive-debug-caret">(move the cursor in the editor)</pre>
         </section>
@@ -587,6 +596,7 @@
       q(".olive-debug-map").addEventListener("change", (e) => setMap(e.target.checked));
       q(".olive-debug-page").addEventListener("change", (e) => setWholePage(e.target.checked));
       q(".olive-debug-page").disabled = !mapOn;
+      q(".olive-debug-elements").addEventListener("change", (e) => setElements(e.target.checked));
       showLegend();
       q(".olive-debug-copy").addEventListener("click", () => {
         navigator.clipboard.writeText(logLines.join("\n")).catch(() => {});
@@ -601,6 +611,7 @@
       if (!panel) build();
       else panel.hidden = !panel.hidden;
       if (panel.hidden && mapOn) setMap(false);
+      if (panel.hidden && elementsOn) setElements(false);
       if (!panel.hidden) {
         panel.querySelector(".olive-debug-version").textContent =
           "v" + chrome.runtime.getManifest().version + " · " + (engine === "wsl" ? "WSL helper" : "browser engine");
@@ -651,6 +662,66 @@
 
     function pageUpdated(page) {
       if (mapOn && wholePage && page === mapPage) requestPage(page, 1000);
+      if (elementsOn && page === elPage) requestElements(page, 1000);
+    }
+
+    // the TikZ elements of the caret's page, as for the whole-page map
+    function setElements(on) {
+      elementsOn = on;
+      if (panel) panel.querySelector(".olive-debug-elements").checked = on;
+      clearElements();
+      if (on) requestElements(caret ? caret.page : -1, 0);
+    }
+
+    function requestElements(page, delay) {
+      clearTimeout(elTimer);
+      if (!elementsOn || page < 0) return;
+      elTimer = setTimeout(() => {
+        elPage = page;
+        send({ type: "caretElements", page });
+      }, delay);
+    }
+
+    function clearElements() {
+      if (elLayer) elLayer.remove();
+      elLayer = null;
+      lastElements = null;
+      elPage = -1;
+      if (panel) panel.querySelector(".olive-debug-elinfo").textContent = "";
+    }
+
+    const KIND_COLORS = { P: "#c92a2a", s: "#c92a2a", p: "#1971c2", n: "#2f9e44", t: "#ae3ec9" };
+    function elements(msg) {
+      if (!elementsOn) return;
+      lastElements = msg;
+      if (msg.page >= slots().length) setSlotCount(msg.page + 1);
+      const slot = slots()[msg.page];
+      if (!slot) return;
+      if (elLayer) elLayer.remove();
+      elLayer = document.createElement("div");
+      elLayer.className = "olive-debug-layer";
+      let shown = 0;
+      const seen = new Set();
+      for (const e of msg.elements) {
+        if (e.box[0] < 0 || !e.src[0]) continue;   // draws nothing, or no source
+        const key = e.box.join(",");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const b = document.createElement("div");
+        b.className = "olive-debug-el";
+        b.style.borderColor = KIND_COLORS[e.kind] || "#555";
+        placeBox(b, slot, e.box);
+        const tag = document.createElement("span");
+        tag.textContent = e.kind + e.src[0];
+        tag.style.color = KIND_COLORS[e.kind] || "#555";
+        b.appendChild(tag);
+        elLayer.appendChild(b);
+        shown++;
+      }
+      slot.appendChild(elLayer);
+      if (panel) panel.querySelector(".olive-debug-elinfo").textContent =
+        `page ${msg.page + 1}: ${shown} element box${shown === 1 ? "" : "es"}` +
+        (msg.elements.length > shown ? ` (${msg.elements.length - shown} without a box or source)` : "");
     }
 
     function clearMap() {
@@ -708,6 +779,7 @@
 
     function caret(msg) {
       if (mapOn && wholePage && msg.h + msg.d > 0.5 && msg.page !== mapPage) requestPage(msg.page, 0);
+      if (elementsOn && msg.h + msg.d > 0.5 && msg.page !== elPage) requestElements(msg.page, 0);
       if (!panel) return;
       const ms = sentAt ? Math.round(performance.now() - sentAt) : null;
       sentAt = 0;
@@ -744,7 +816,7 @@
       }
     }, true);
 
-    return { map, caret, cursor, log, clearMap, pageUpdated, redraw: drawMap,
+    return { map, elements, caret, cursor, log, clearMap, clearElements, pageUpdated, redraw: drawMap,
       get lineMapOn() { return mapOn && !wholePage; } };
   })();
 
@@ -846,6 +918,9 @@
       case "caretDebug":
         dbg.map(msg);
         break;
+      case "caretElements":
+        dbg.elements(msg);
+        break;
       case "debug":
         dbg.log(msg.text);
         break;
@@ -875,6 +950,7 @@
       caretEl.remove();
       caretBox.remove();
       dbg.clearMap();
+      dbg.clearElements();
       if (was) restoreToolbar();
     }
     if (settings.on) { applyZoom(); checkView(); }

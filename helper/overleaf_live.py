@@ -31,6 +31,7 @@ Messages (JSON, one per WebSocket message)
     {"type": "scan", "page": n, "x": pt, "y": pt}   double-click on a page
     {"type": "caretDebug", "on": bool}       debug panel: the caret map
     {"type": "caretMap", "page": n}          debug panel: the caret map of a page
+    {"type": "caretElements", "page": n}     debug panel: the TikZ elements of a page
   helper -> extension
     {"type": "versions", "extension": "0.1.1"}   the version install.sh put
                                              in the Windows folder
@@ -44,6 +45,8 @@ Messages (JSON, one per WebSocket message)
                                              baseline; h, d: line height; box:
                                              only for a part that does not map
                                              1:1 to its glyphs, e.g. a math symbol)
+    {"type": "caretElements", "page": n, "elements": [{"kind", "line", "end", "index",
+     "depth", "box", "file", "src": [l0, c0, l1, c1]}, ...]}   debug panel
     {"type": "caretDebug", "page": n, "points": [[line, col, x, y, h, d, box], ...],
      "boxes": [[x0, y0, x1, y1], ...]}       debug panel: every character near
                                              the cursor
@@ -59,6 +62,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import sys
@@ -263,6 +267,9 @@ class Project:
             if line.startswith("(synctex-debug "):
                 await self.send(parse_caret_debug(line))
                 continue
+            if line.startswith("(synctex-elements "):
+                await self.send(parse_elements(line))
+                continue
             m = back_re.match(line)
             if m:
                 rel = self.project_path(re.sub(r'\\(.)', r'\1', m[1]))
@@ -442,6 +449,9 @@ class Project:
         x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
         await self.command(f"(synctex-scan {page} {x:.2f} {y:.2f})")
 
+    async def on_caret_elements(self, ws, msg):
+        await self.command(f"(caret-elements {max(0, int(msg.get('page', 0)))})")
+
     async def on_caret_map(self, ws, msg):
         await self.command(f"(caret-map {max(0, int(msg.get('page', 0)))})")
 
@@ -468,6 +478,20 @@ def parse_caret_debug(line):
     i += 1
     boxes = [v[i + 4 * k:i + 4 * k + 4] for k in range(m)]
     return {"type": "caretDebug", "page": page, "points": points, "boxes": boxes}
+
+
+def parse_elements(line):
+    """(synctex-elements page n kind line end index depth x0 y0 x1 y1 "file" l0 c0 l1 c1 ...)"""
+    toks = shlex.split(line[1:-1])
+    page, n = int(toks[1]), int(toks[2])
+    elements = []
+    for k in range(n):
+        i = 3 + 14 * k
+        elements.append({"kind": toks[i], "line": int(toks[i + 1]), "end": int(toks[i + 2]),
+                         "index": int(toks[i + 3]), "depth": int(toks[i + 4]),
+                         "box": [float(v) for v in toks[i + 5:i + 9]], "file": toks[i + 9],
+                         "src": [int(v) for v in toks[i + 10:i + 14]]})
+    return {"type": "caretElements", "page": page, "elements": elements}
 
 
 PROJECTS = {}                   # project id -> Project
@@ -504,7 +528,8 @@ async def handler(ws, path=None):
                     "view": project.on_view, "width": project.on_width,
                     "lua": project.on_lua, "cursor": project.on_cursor,
                     "scan": project.on_scan, "caretDebug": project.on_caret_debug,
-                    "caretMap": project.on_caret_map}.get(kind)
+                    "caretMap": project.on_caret_map,
+                    "caretElements": project.on_caret_elements}.get(kind)
                 if handler_fn:
                     await handler_fn(ws, msg)
             except Exception as e:          # one bad message must not end the connection

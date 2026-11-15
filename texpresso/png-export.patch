@@ -1,26 +1,26 @@
-From 989671267331b51c37fa00d4a4905d7072107324 Mon Sep 17 00:00:00 2001
+From 1661d2e0619e5ac38c4f0ce0b77b5c835d63b428 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  commands, .tex in -I paths, TeX Live pictures, SyncTeX with columns, caret on
- the glyphs
+ the glyphs, TikZ elements
 
 ---
  src/dvi/dvi_prim.c                |    4 +-
  src/dvi/dvi_resmanager.c          |   62 +-
- src/dvi/dvi_special.c             |   52 +-
- src/dvi/dvi_special.re2c.c        |   52 +-
+ src/dvi/dvi_special.c             |   74 +-
+ src/dvi/dvi_special.re2c.c        |   74 +-
  src/dvi/mydvi.h                   |    2 +
  src/engine/engine/xetex-synctex.c |   44 +-
  src/engine/engine/xetex-xetex0.c  |   25 +-
  src/engine/engine/xetex-xetexd.h  |   11 +
- src/frontend/editor.c             |   94 +-
- src/frontend/editor.h             |   33 +
+ src/frontend/editor.c             |  105 +-
+ src/frontend/editor.h             |   34 +
  src/frontend/engine_tex.c         |   71 ++
- src/frontend/main.c               |  541 +++++++++++
- src/frontend/synctex.c            | 1403 +++++++++++++++++++++++++++++
- src/frontend/synctex.h            |   59 ++
- 14 files changed, 2396 insertions(+), 57 deletions(-)
+ src/frontend/main.c               |  885 +++++++++++++++
+ src/frontend/synctex.c            | 1735 +++++++++++++++++++++++++++++
+ src/frontend/synctex.h            |   85 ++
+ 14 files changed, 3154 insertions(+), 57 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -139,7 +139,7 @@ index f702dfa..df97614 100644
    fz_catch(ctx)
    {
 diff --git a/src/dvi/dvi_special.c b/src/dvi/dvi_special.c
-index 516e30d..733ba92 100644
+index 516e30d..80418a2 100644
 --- a/src/dvi/dvi_special.c
 +++ b/src/dvi/dvi_special.c
 @@ -1140,7 +1140,11 @@ embed_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, struct xform_spec *xf
@@ -271,8 +271,37 @@ index 516e30d..733ba92 100644
          case PDF_OP_v:
          case PDF_OP_y:
          case PDF_OP_BT:
+@@ -4442,6 +4468,28 @@ yy410:
+ 
+ bool dvi_exec_special(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t lim)
+ {
++  /* Overleaf Live: element markers that TikZ writes in the live preview
++     (see olive_hooks in frontend/main.c): "olive:b ..." starts an element
++     (a path, a node, a to[...]), "olive:e ..." ends it. They become layers,
++     which do not change the rendering; the caret device reads them. */
++  if (lim - cur > 7 && memcmp(cur, "olive:", 6) == 0)
++  {
++    if (dc->dev)
++    {
++      char name[256];
++      int n = (int)(lim - cur) < 255 ? (int)(lim - cur) : 255;
++      memcpy(name, cur, n);
++      name[n] = 0;
++      fz_begin_layer(ctx, dc->dev, name);
++      if (cur[6] == 'e')
++      {
++        fz_end_layer(ctx, dc->dev);
++        fz_end_layer(ctx, dc->dev);
++      }
++    }
++    return 1;
++  }
++
+   cursor_t mar, i, j;
+ 
+   // fprintf(stderr, "special: %.*s\n", (int)(lim - cur), cur);
 diff --git a/src/dvi/dvi_special.re2c.c b/src/dvi/dvi_special.re2c.c
-index f4878b6..2955fd9 100644
+index f4878b6..9f0ec79 100644
 --- a/src/dvi/dvi_special.re2c.c
 +++ b/src/dvi/dvi_special.re2c.c
 @@ -463,7 +463,11 @@ embed_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, struct xform_spec *xf
@@ -404,6 +433,35 @@ index f4878b6..2955fd9 100644
          case PDF_OP_v:
          case PDF_OP_y:
          case PDF_OP_BT:
+@@ -1211,6 +1237,28 @@ dvi_exec_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, curs
+ 
+ bool dvi_exec_special(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t lim)
+ {
++  /* Overleaf Live: element markers that TikZ writes in the live preview
++     (see olive_hooks in frontend/main.c): "olive:b ..." starts an element
++     (a path, a node, a to[...]), "olive:e ..." ends it. They become layers,
++     which do not change the rendering; the caret device reads them. */
++  if (lim - cur > 7 && memcmp(cur, "olive:", 6) == 0)
++  {
++    if (dc->dev)
++    {
++      char name[256];
++      int n = (int)(lim - cur) < 255 ? (int)(lim - cur) : 255;
++      memcpy(name, cur, n);
++      name[n] = 0;
++      fz_begin_layer(ctx, dc->dev, name);
++      if (cur[6] == 'e')
++      {
++        fz_end_layer(ctx, dc->dev);
++        fz_end_layer(ctx, dc->dev);
++      }
++    }
++    return 1;
++  }
++
+   cursor_t mar, i, j;
+ 
+   // fprintf(stderr, "special: %.*s\n", (int)(lim - cur), cur);
 diff --git a/src/dvi/mydvi.h b/src/dvi/mydvi.h
 index e2f2105..4a4eef6 100644
 --- a/src/dvi/mydvi.h
@@ -591,7 +649,7 @@ index 183c218..ee3637a 100644
  #define GLUE_SPEC_stretch_order(p) mem[p].b16.s1 /* aka "type" of a node */
  #define GLUE_SPEC_shrink_order(p) mem[p].b16.s0 /* aka "subtype" of a node */
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
-index 6face98..6cce9ca 100644
+index 6face98..33c5353 100644
 --- a/src/frontend/editor.c
 +++ b/src/frontend/editor.c
 @@ -219,6 +219,50 @@ bool editor_parse(fz_context *ctx,
@@ -645,10 +703,21 @@ index 6face98..6cce9ca 100644
    else if (strcmp(verb, "rescan") == 0)
    {
      if (len != 1)
-@@ -252,23 +296,71 @@ bool editor_parse(fz_context *ctx,
+@@ -252,23 +296,82 @@ bool editor_parse(fz_context *ctx,
      *out = (struct editor_command){.tag = EDIT_STAY_ON_TOP,
                                     .stay_on_top = {.status = status}};
    }
++  else if (strcmp(verb, "caret-elements") == 0)
++  {
++    // (caret-elements page): the TikZ elements of the page (debug panel)
++    if (len != 2)
++      goto arity;
++    val page = val_array_get(ctx, stack, command, 1);
++    if (!val_is_number(page))
++      goto arguments;
++    *out = (struct editor_command){.tag = EDIT_CARET_ELEMENTS,
++                                   .caret_map = {.page = val_number(ctx, page)}};
++  }
 +  else if (strcmp(verb, "caret-map") == 0)
 +  {
 +    // (caret-map page): the caret map of every source line on the page
@@ -719,19 +788,20 @@ index 6face98..6cce9ca 100644
    {
      if (len != 1)
 diff --git a/src/frontend/editor.h b/src/frontend/editor.h
-index 05fdd1c..0250a03 100644
+index 05fdd1c..0d9c676 100644
 --- a/src/frontend/editor.h
 +++ b/src/frontend/editor.h
-@@ -28,6 +28,8 @@ enum EDITOR_COMMAND
+@@ -28,6 +28,9 @@ enum EDITOR_COMMAND
    EDIT_RESCAN,
    EDIT_STAY_ON_TOP,
    EDIT_SYNCTEX_FORWARD,
 +  EDIT_CARET_DEBUG,
 +  EDIT_CARET_MAP,
++  EDIT_CARET_ELEMENTS,
    EDIT_MAP_WINDOW,
    EDIT_UNMAP_WINDOW,
    EDIT_CROP,
-@@ -37,6 +39,10 @@ enum EDITOR_COMMAND
+@@ -37,6 +40,10 @@ enum EDITOR_COMMAND
    EDIT_RESUME,
    EDIT_RERUN,
    EDIT_RERUN_ONCE,
@@ -742,7 +812,7 @@ index 05fdd1c..0250a03 100644
  };
  
  struct editor_change
-@@ -105,8 +111,22 @@ struct editor_command
+@@ -105,8 +112,22 @@ struct editor_command
      struct {
        const char *path;
        int line;
@@ -765,7 +835,7 @@ index 05fdd1c..0250a03 100644
      struct {
        float x, y, w, h;
      } map_window;
-@@ -136,6 +156,19 @@ struct editor_command
+@@ -136,6 +157,19 @@ struct editor_command
  
      struct {
      } rerun_once;
@@ -882,10 +952,10 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..275571e 100644
+index c202294..3738421 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,357 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,691 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -893,18 +963,184 @@ index c202294..275571e 100644
 +   The glyphs of a page (from its display list) and the text of the source
 +   line of the last forward search, for synctex_refine_target. */
 +
++/* Overleaf Live: TeX code that marks each TikZ element in the live preview
++   (a virtual pgf.cfg, which pgf reads, and the file it loads after TikZ).
++   The markers are specials "olive:b ..." / "olive:e ..." (see
++   dvi_exec_special); the caret device reads them as layers. */
++static const char olive_pgf_cfg[] =
++  "\\ProvidesFile{pgf.cfg}[2026/11/15 Overleaf Live preview]\n"
++  "% Overleaf Live: only in the live preview (the Overleaf PDF does not read\n"
++  "% this file). After TikZ is loaded, mark its elements (olive-tikz.tex).\n"
++  "\\ifx\\AddToHook\\undefined\\else\n"
++  "  \\AddToHook{package/tikz/after}{\\input{olive-tikz.tex}}\n"
++  "\\fi\n"
++  "\\endinput\n";
++
++static const char olive_tikz_tex[] =
++  "% Overleaf Live: the live preview reads this file after TikZ (see pgf.cfg).\n"
++  "% It marks each TikZ element, for the caret and for clicks:\n"
++  "%   \\special{olive:b KIND LINE INDEX {DIR}{FILE}} ... \\special{olive:e LINE}\n"
++  "% KIND p: the INDEX-th path of LINE (\\draw, \\fill, \\node, ... up to ;); n: the INDEX-th node of\n"
++  "% LINE; t: a node of the INDEX-th to[...] of LINE (e.g. a circuitikz part);\n"
++  "% s: a scope; P: a picture (tikzpicture, circuitikz, \\tikz).\n"
++  "% The markers change nothing in the drawing.\n"
++  "\\edef\\oliveRestoreCatcodes{\\catcode`\\noexpand\\@=\\the\\catcode`\\@\\relax}%\n"
++  "\\catcode`\\@=11\n"
++  "\\newcount\\olive@k\n"
++  "\\newcount\\olive@n\n"
++  "\\def\\olive@kline{-1}%\n"
++  "\\def\\olive@nline{-1}%\n"
++  "\\def\\olive@to{0}%\n"
++  "\\def\\olive@coordinate{coordinate}%\n"
++  "\\def\\olive@file{{\\ifdefined\\CurrentFilePath\\detokenize\\expandafter{\\CurrentFilePath}\\fi}%\n"
++  "  {\\ifdefined\\CurrentFile\\detokenize\\expandafter{\\CurrentFile}\\fi}}%\n"
++  "\\def\\olive@b#1#2{\\special{olive:b #1 \\the\\inputlineno\\space#2 \\olive@file}}%\n"
++  "\\def\\olive@e{\\special{olive:e \\the\\inputlineno}}%\n"
++  "% A path ends after \\tikz@finish closes its group (\\tikz@path@do@at@end);\n"
++  "% \\tikz@finish of a node shape runs deeper, inside the path.\n"
++  "\\def\\olive@plevel{-1}%\n"
++  "\\newcount\\olive@p\n"
++  "\\def\\olive@pline{-1}%\n"
++  "\\def\\olive@path{\\gdef\\olive@to{0}%\n"
++  "  \\ifnum\\olive@plevel<0\n"
++  "    \\edef\\olive@here{\\the\\inputlineno}%\n"
++  "    \\ifx\\olive@here\\olive@pline\n"
++  "      \\global\\advance\\olive@p by 1\n"
++  "    \\else\n"
++  "      \\global\\olive@p=1\n"
++  "      \\global\\let\\olive@pline\\olive@here\n"
++  "    \\fi\n"
++  "    \\olive@b p{\\the\\olive@p}\\xdef\\olive@plevel{\\the\\currentgrouplevel}%\n"
++  "  \\fi}%\n"
++  "\\let\\olive@doatend\\tikz@path@do@at@end\n"
++  "\\def\\tikz@path@do@at@end{%\n"
++  "  \\ifnum\\currentgrouplevel<\\olive@plevel\\relax\n"
++  "    \\olive@e\\gdef\\olive@plevel{-1}%\n"
++  "  \\fi\n"
++  "  \\olive@doatend}%\n"
++  "\\def\\olive@beginto{%\n"
++  "  \\edef\\olive@here{\\the\\inputlineno}%\n"
++  "  \\ifx\\olive@here\\olive@kline\n"
++  "    \\global\\advance\\olive@k by 1\n"
++  "  \\else\n"
++  "    \\global\\olive@k=1\n"
++  "    \\global\\let\\olive@kline\\olive@here\n"
++  "  \\fi\n"
++  "  \\xdef\\olive@to{\\the\\olive@k}}%\n"
++  "\\let\\olive@multipartnode\\pgfmultipartnode\n"
++  "\\def\\pgfmultipartnode#1#2#3#4{%\n"
++  "  \\def\\olive@shape{#1}%\n"
++  "  \\ifx\\olive@shape\\olive@coordinate\n"
++  "    \\olive@multipartnode{#1}{#2}{#3}{#4}%\n"
++  "  \\else\n"
++  "    \\ifnum\\olive@to>0\n"
++  "      \\olive@b t\\olive@to\n"
++  "    \\else\n"
++  "      \\edef\\olive@here{\\the\\inputlineno}%\n"
++  "      \\ifx\\olive@here\\olive@nline\n"
++  "        \\global\\advance\\olive@n by 1\n"
++  "      \\else\n"
++  "        \\global\\olive@n=1\n"
++  "        \\global\\let\\olive@nline\\olive@here\n"
++  "      \\fi\n"
++  "      \\olive@b n{\\the\\olive@n}%\n"
++  "    \\fi\n"
++  "    \\olive@multipartnode{#1}{#2}{#3}{#4}%\n"
++  "    \\olive@e\n"
++  "  \\fi}%\n"
++  "\\tikzset{every path/.append style={/utils/exec=\\olive@path},\n"
++  "  execute at begin to=\\olive@beginto,\n"
++  "  every scope/.append style={execute at begin scope={\\olive@b s0},\n"
++  "    execute at end scope=\\olive@e},\n"
++  "  every picture/.append style={execute at begin picture={\\olive@b P0},\n"
++  "    execute at end picture=\\olive@e}}%\n"
++  "\\oliveRestoreCatcodes\n"
++  "\\endinput\n";
++
++static void interpret_open(struct persistent_state *ps, ui_state *ui,
++                           const char *path, const void *data, int size);
++
++static void olive_install(struct persistent_state *ps, ui_state *ui)
++{
++  if (getenv("TXP_NO_OLIVE"))   /* to compare the output without the markers */
++    return;
++  interpret_open(ps, ui, "pgf.cfg", olive_pgf_cfg, (int)strlen(olive_pgf_cfg));
++  interpret_open(ps, ui, "olive-tikz.tex", olive_tikz_tex, (int)strlen(olive_tikz_tex));
++}
++
 +static char caret_path[1024];
-+static int caret_line;
++static int caret_line, caret_col;
 +static int caret_debug;   /* (caret-debug t): report every character too */
++
++enum { LAYER_OTHER, LAYER_PICTURE, LAYER_ELEMENT, LAYER_END, MAX_LAYERS = 128 };
 +
 +typedef struct {
 +  fz_device super;
 +  synctex_glyph *g;
 +  int n, cap;
 +  float inv;   /* 1 / scale factor: points -> SyncTeX units */
-+  int picture;      /* in a picture (layer "olive-picture"): its depth */
++  int picture;      /* in a picture (layer "olive-picture") */
 +  fz_rect pbox;     /* the box of what the picture draws */
++  /* elements (layers "olive:b ..."), see dvi_exec_special */
++  synctex_element *el;
++  fz_rect *ebox;
++  int nel, capel;
++  int layer[MAX_LAYERS], layer_el[MAX_LAYERS], nlayers;
 +} glyph_device;
++
++/* what is drawn in open elements makes their box */
++static void element_add(glyph_device *dev, fz_rect r)
++{
++  if (fz_is_empty_rect(r) || fz_is_infinite_rect(r))
++    return;
++  for (int i = 0; i < dev->nlayers && i < MAX_LAYERS; i++)
++    if (dev->layer[i] == LAYER_ELEMENT)
++    {
++      fz_rect *b = &dev->ebox[dev->layer_el[i]];
++      *b = fz_is_empty_rect(*b) ? r : fz_union_rect(*b, r);
++    }
++}
++
++/* "olive:b KIND LINE INDEX {DIR}{NAME}" */
++static void element_begin(fz_context *ctx, glyph_device *dev, const char *name, int slot)
++{
++  if (dev->nel == dev->capel)
++  {
++    int cap = dev->capel ? dev->capel * 2 : 64;
++    dev->el = fz_realloc_array(ctx, dev->el, cap, synctex_element);
++    dev->ebox = fz_realloc_array(ctx, dev->ebox, cap, fz_rect);
++    dev->capel = cap;
++  }
++  synctex_element *e = &dev->el[dev->nel];
++  memset(e, 0, sizeof(*e));
++  char kind = 0;
++  int line = 0, index = 0, used = 0;
++  if (sscanf(name, "olive:b %c %d %d %n", &kind, &line, &index, &used) < 3)
++    return;
++  e->kind = kind;
++  e->line = line;
++  e->index = index;
++  /* {dir}{name} -> "dir/name" ("" for the main file) */
++  const char *q = name + used;
++  char part[2][256] = {"", ""};
++  for (int k = 0; k < 2 && *q == '{'; k++)
++  {
++    const char *z = strchr(q, '}');
++    if (!z) break;
++    snprintf(part[k], sizeof(part[k]), "%.*s", (int)(z - q - 1), q + 1);
++    q = z + 1;
++  }
++  if (part[1][0])
++    snprintf(e->file, sizeof(e->file), "%s%s%s", part[0],
++             part[0][0] && part[0][strlen(part[0]) - 1] != '/' ? "/" : "", part[1]);
++  int depth = 0;
++  for (int i = 0; i < slot; i++)
++    if (dev->layer[i] == LAYER_ELEMENT) depth++;
++  e->depth = depth;
++  dev->ebox[dev->nel] = fz_empty_rect;
++  dev->layer_el[slot] = dev->nel++;
++  dev->layer[slot] = LAYER_ELEMENT;
++}
 +
 +static void glyph_push(fz_context *ctx, glyph_device *dev, synctex_glyph g)
 +{
@@ -922,6 +1158,7 @@ index c202294..275571e 100644
 +{
 +  if (fz_is_empty_rect(r) || fz_is_infinite_rect(r))
 +    return;
++  element_add(dev, r);
 +  if (dev->picture > 0)
 +  {
 +    dev->pbox = fz_is_empty_rect(dev->pbox) ? r : fz_union_rect(dev->pbox, r);
@@ -935,21 +1172,51 @@ index c202294..275571e 100644
 +static void glyph_begin_layer(fz_context *ctx, fz_device *dev_, const char *name)
 +{
 +  glyph_device *dev = (glyph_device *)dev_;
-+  (void)ctx;
-+  if (dev->picture > 0)
-+    dev->picture++;
-+  else if (name && strcmp(name, "olive-picture") == 0)
++  int i = dev->nlayers++;
++  if (i >= MAX_LAYERS)
++    return;
++  dev->layer[i] = LAYER_OTHER;
++  if (!name)
++    return;
++  if (strcmp(name, "olive-picture") == 0 && !dev->picture)
 +  {
 +    dev->picture = 1;
 +    dev->pbox = fz_empty_rect;
++    dev->layer[i] = LAYER_PICTURE;
++  }
++  else if (strncmp(name, "olive:b ", 8) == 0)
++    element_begin(ctx, dev, name, i);
++  else if (strncmp(name, "olive:e ", 8) == 0)
++  {
++    /* the end of the innermost element: where its source ends */
++    for (int k = i - 1; k >= 0; k--)
++      if (dev->layer[k] == LAYER_ELEMENT)
++      {
++        dev->el[dev->layer_el[k]].end_line = atoi(name + 8);
++        break;
++      }
++    dev->layer[i] = LAYER_END;
 +  }
 +}
 +
 +static void glyph_end_layer(fz_context *ctx, fz_device *dev_)
 +{
 +  glyph_device *dev = (glyph_device *)dev_;
-+  if (dev->picture > 0 && --dev->picture == 0)
++  if (dev->nlayers <= 0)
++    return;
++  int i = --dev->nlayers;
++  if (i < MAX_LAYERS && dev->layer[i] == LAYER_PICTURE)
++  {
++    dev->picture = 0;
 +    glyph_picture(ctx, dev, dev->pbox);
++  }
++}
++
++static void glyph_fill_shade(fz_context *ctx, fz_device *dev_, fz_shade *shade,
++                             fz_matrix ctm, float alpha, fz_color_params cp)
++{
++  (void)alpha; (void)cp;
++  element_add((glyph_device *)dev_, fz_bound_shade(ctx, shade, ctm));
 +}
 +
 +static void glyph_fill_image(fz_context *ctx, fz_device *dev_, fz_image *img,
@@ -967,6 +1234,8 @@ index c202294..275571e 100644
 +  (void)even_odd; (void)cs; (void)color; (void)alpha; (void)cp;
 +  if (dev->picture > 0)   /* only in a picture: TikZ and rules are not glyphs */
 +    glyph_picture(ctx, dev, fz_bound_path(ctx, path, NULL, ctm));
++  else
++    element_add(dev, fz_bound_path(ctx, path, NULL, ctm));
 +}
 +
 +static void glyph_stroke_path(fz_context *ctx, fz_device *dev_, const fz_path *path,
@@ -975,8 +1244,18 @@ index c202294..275571e 100644
 +{
 +  glyph_device *dev = (glyph_device *)dev_;
 +  (void)cs; (void)color; (void)alpha; (void)cp; (void)st;
-+  if (dev->picture > 0)   /* the path itself: the stroke bound is too wide (miters) */
-+    glyph_picture(ctx, dev, fz_bound_path(ctx, path, NULL, ctm));
++  fz_rect r = fz_bound_path(ctx, path, NULL, ctm);   /* the stroke bound is too wide (miters) */
++  if (st && fz_is_valid_rect(r))
++  {
++    /* half the line width around the path itself (a straight line has an
++       empty box without it) */
++    float w = st->linewidth * 0.5f * fz_matrix_expansion(ctm);
++    r.x0 -= w; r.y0 -= w; r.x1 += w; r.y1 += w;
++  }
++  if (dev->picture > 0)
++    glyph_picture(ctx, dev, r);
++  else
++    element_add(dev, r);
 +}
 +
 +static void glyph_fill_text(fz_context *ctx, fz_device *dev_, const fz_text *text,
@@ -1010,6 +1289,7 @@ index c202294..275571e 100644
 +        glyph_picture(ctx, dev, fz_union_rect(ink, fz_make_rect(x0, p.y, x1, p.y)));
 +        continue;
 +      }
++      element_add(dev, fz_union_rect(ink, fz_make_rect(x0, p.y, x1, p.y)));
 +      int iy0 = (int)(p.y * dev->inv), iy1 = iy0;
 +      if (!fz_is_empty_rect(ink) && !fz_is_infinite_rect(ink))
 +      { iy0 = (int)(ink.y0 * dev->inv); iy1 = (int)(ink.y1 * dev->inv); }
@@ -1020,10 +1300,21 @@ index c202294..275571e 100644
 +  }
 +}
 +
-+/* glyphs of a page in SyncTeX units; *n = their count; free with fz_free */
++/* glyphs of a page in SyncTeX units; *n = their count; free with fz_free.
++   With els: also the elements of the page (free *els with fz_free). */
++static synctex_glyph *page_scan(fz_context *ctx, txp_engine *eng, int page, int *n,
++                                synctex_element **els, int *nels);
++
 +static synctex_glyph *page_glyphs(fz_context *ctx, txp_engine *eng, int page, int *n)
 +{
++  return page_scan(ctx, eng, page, n, NULL, NULL);
++}
++
++static synctex_glyph *page_scan(fz_context *ctx, txp_engine *eng, int page, int *n,
++                                synctex_element **els, int *nels)
++{
 +  *n = 0;
++  if (els) { *els = NULL; *nels = 0; }
 +  float fs = send(scale_factor, eng);
 +  if (fs <= 0)
 +    return NULL;
@@ -1042,12 +1333,30 @@ index c202294..275571e 100644
 +    dev->super.stroke_path = glyph_stroke_path;
 +    dev->super.begin_layer = glyph_begin_layer;
 +    dev->super.end_layer = glyph_end_layer;
++    dev->super.fill_shade = glyph_fill_shade;
 +    dev->inv = 1.0f / fs;
 +    fz_run_display_list(ctx, dl, &dev->super, fz_identity, fz_infinite_rect, NULL);
 +    fz_close_device(ctx, &dev->super);
 +    result = dev->g;
 +    *n = dev->n;
 +    dev->g = NULL;
++    if (els)
++    {
++      for (int i = 0; i < dev->nel; i++)
++      {
++        fz_rect b = dev->ebox[i];
++        synctex_element *e = &dev->el[i];
++        e->has_box = !fz_is_empty_rect(b) && !fz_is_infinite_rect(b);
++        if (e->has_box)
++        {
++          e->x0 = (int)(b.x0 * dev->inv); e->y0 = (int)(b.y0 * dev->inv);
++          e->x1 = (int)(b.x1 * dev->inv); e->y1 = (int)(b.y1 * dev->inv);
++        }
++      }
++      *els = dev->el;
++      *nels = dev->nel;
++      dev->el = NULL;
++    }
 +  }
 +  fz_always(ctx)
 +  {
@@ -1056,6 +1365,8 @@ index c202294..275571e 100644
 +      if (dev->g)   /* not handed out: an error */
 +        for (int i = 0; i < dev->n; i++) fz_drop_font(ctx, dev->g[i].font);
 +      fz_free(ctx, dev->g);
++      fz_free(ctx, dev->el);
++      fz_free(ctx, dev->ebox);
 +      fz_drop_device(ctx, &dev->super);
 +    }
 +    fz_drop_display_list(ctx, dl);
@@ -1164,6 +1475,53 @@ index c202294..275571e 100644
 +  printf(")\n");
 +}
 +
++/* the main file, as an element names it (TeX gives no name for it) */
++static const char *main_file_name(struct persistent_state *ps)
++{
++  const char *base = strrchr(ps->doc_name, '/');
++  return base ? base + 1 : ps->doc_name;
++}
++
++/* a click on an element without glyphs under it (a line, a shape of a
++   TikZ picture): the editor goes to the start of its source */
++static int element_click(struct persistent_state *ps, ui_state *ui, int page, int x, int y)
++{
++  int ng = 0, ne = 0, done = 0;
++  synctex_element *els = NULL;
++  synctex_glyph *glyphs = page_scan(ps->ctx, ui->eng, page, &ng, &els, &ne);
++  int on_glyph = 0, slack = 65536 / 2;
++  for (int i = 0; i < ng && !on_glyph; i++)
++    if (glyphs[i].font && x >= glyphs[i].x0 - slack && x <= glyphs[i].x1 + slack &&
++        y >= glyphs[i].y0 - slack && y <= glyphs[i].y1 + slack)
++      on_glyph = 1;
++  /* text: SyncTeX knows its line, except in TikZ (all its text is on the
++     line where the picture ends): there the element */
++  int k = synctex_element_at(els, ne, x, y);
++  if (on_glyph && k >= 0 && !strchr("ntp", els[k].kind))
++    k = -1;
++  if (k >= 0)
++  {
++    const synctex_element *e = &els[k];
++    const char *name = e->file[0] ? e->file : main_file_name(ps);
++    synctex_file file;
++    synctex_range r;
++    if (caret_file(ps->ctx, ps->doc_path, name, (int)strlen(name), &file))
++    {
++      if (synctex_element_range(&file, e, &r))
++      {
++        fprintf(stderr, "[synctex scan] element %c line %d -> %s:%d:%d\n", e->kind, e->line,
++                name, r.l0, r.c0);
++        editor_synctex(ps->doc_path, name, (int)strlen(name), r.l0, r.c0);
++        done = 1;
++      }
++      caret_file_free(ps->ctx, &file);
++    }
++  }
++  fz_free(ps->ctx, els);
++  drop_glyphs(ps->ctx, glyphs, ng);
++  return done;
++}
++
 +/* the caret of the last forward search (x, y: the point of SyncTeX), on
 +   stdout, in points:
 +     (synctex-target page x y height depth [box-x0 box-y0 box-x1 box-y1])
@@ -1171,8 +1529,9 @@ index c202294..275571e 100644
 +static void caret_report(struct persistent_state *ps, ui_state *ui, synctex_t *stx,
 +                         fz_buffer *buf, int page, int x, int y)
 +{
-+  int ng = 0;
-+  synctex_glyph *glyphs = page_glyphs(ps->ctx, ui->eng, page, &ng);
++  int ng = 0, ne = 0;
++  synctex_element *els = NULL;
++  synctex_glyph *glyphs = page_scan(ps->ctx, ui->eng, page, &ng, &els, &ne);
 +  synctex_file file;
 +  int has_file = caret_path[0] &&
 +                 caret_file(ps->ctx, ps->doc_path, caret_path, (int)strlen(caret_path), &file);
@@ -1185,6 +1544,11 @@ index c202294..275571e 100644
 +  int rx = x, ry = y, rh = 0, rd = 0;
 +  synctex_refine_target(ps->ctx, stx, buf, page, glyphs, ng, has_file ? &file : NULL,
 +                        &rx, &ry, &rh, &rd, &info);
++  /* in a TikZ element without text of its own: the box of the element */
++  if (has_file && ne > 0)
++    synctex_element_caret(&file, caret_path, main_file_name(ps), caret_line, caret_col,
++                          els, ne, &rx, &ry, &rh, &rd, &info);
++  fz_free(ps->ctx, els);
 +  drop_glyphs(ps->ctx, glyphs, ng);
 +  if (has_file)
 +    caret_file_free(ps->ctx, &file);
@@ -1200,6 +1564,46 @@ index c202294..275571e 100644
 +  if (caret_debug)
 +    print_caret_map(page, fs, &info);
 +  fflush(stdout);
++}
++
++/* (caret-elements page): the elements that TikZ marked on the page, answer
++   (synctex-elements page n kind line end-line index depth x0 y0 x1 y1 "file"
++    l0 c0 l1 c1 ...), l0 ... c1: its source (0 if not found),
++   in points; x0 = -1 for an element that draws nothing */
++static void caret_page_elements(struct persistent_state *ps, ui_state *ui, int page)
++{
++  int ng = 0, ne = 0;
++  synctex_element *els = NULL;
++  synctex_glyph *glyphs = page_scan(ps->ctx, ui->eng, page, &ng, &els, &ne);
++  drop_glyphs(ps->ctx, glyphs, ng);
++  float fs = send(scale_factor, ui->eng);
++  printf("(synctex-elements %d %d", page, ne);
++  for (int i = 0; i < ne; i++)
++  {
++    const synctex_element *e = &els[i];
++    printf(" %c %d %d %d %d", e->kind ? e->kind : '?', e->line, e->end_line, e->index, e->depth);
++    if (e->has_box)
++      printf(" %.2f %.2f %.2f %.2f", fs * e->x0, fs * e->y0, fs * e->x1, fs * e->y1);
++    else
++      printf(" -1 -1 -1 -1");
++    printf(" \"");
++    for (const char *c = e->file; *c; c++)
++      if (*c == '"' || *c == '\\') printf("\\%c", *c); else putchar(*c);
++    printf("\"");
++    /* its source: l0 c0 l1 c1 (0 if not found) */
++    synctex_range r = {0, 0, 0, 0};
++    const char *name = e->file[0] ? e->file : main_file_name(ps);
++    synctex_file file;
++    if (caret_file(ps->ctx, ps->doc_path, name, (int)strlen(name), &file))
++    {
++      synctex_element_range(&file, e, &r);
++      caret_file_free(ps->ctx, &file);
++    }
++    printf(" %d %d %d %d", r.l0, r.c0, r.l1, r.c1);
++  }
++  printf(")\n");
++  fflush(stdout);
++  fz_free(ps->ctx, els);
 +}
 +
 +/* (caret-map page): the caret map of every source line on the page, from
@@ -1243,7 +1647,7 @@ index c202294..275571e 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1268,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1602,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1369,10 +1773,14 @@ index c202294..275571e 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +1539,15 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +1873,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
++    case EDIT_CARET_ELEMENTS:
++      caret_page_elements(ps, ui, cmd.caret_map.page);
++      break;
++
 +    case EDIT_CARET_MAP:
 +      caret_page_map(ps, ui, cmd.caret_map.page);
 +      break;
@@ -1385,13 +1793,14 @@ index c202294..275571e 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +1563,32 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +1901,35 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
 +        synctex_set_target_column(stx, cmd.synctex_forward.column);
 +        snprintf(caret_path, sizeof caret_path, "%s", path);
 +        caret_line = cmd.synctex_forward.line;
++        caret_col = cmd.synctex_forward.column;
          schedule_event(STDIN_EVENT);
        }
      }
@@ -1406,8 +1815,10 @@ index c202294..275571e 100644
 +      {
 +        float f = 1 / send(scale_factor, ui->eng);
 +        int sx = f * cmd.synctex_scan.x, sy = f * cmd.synctex_scan.y;
-+        if (!synctex_scan_column(ps->ctx, stx, buf, ps->doc_path,
-+                                 cmd.synctex_scan.page, sx, sy))
++        if (element_click(ps, ui, cmd.synctex_scan.page, sx, sy))
++          ;
++        else if (!synctex_scan_column(ps->ctx, stx, buf, ps->doc_path,
++                                      cmd.synctex_scan.page, sx, sy))
 +          synctex_scan(ps->ctx, stx, buf, ps->doc_path,
 +                       cmd.synctex_scan.page, sx, sy);
 +        fflush(stdout);
@@ -1418,7 +1829,7 @@ index c202294..275571e 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1634,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1975,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1452,7 +1863,20 @@ index c202294..275571e 100644
    }
  }
  
-@@ -1353,6 +1880,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +2102,12 @@ bool texpresso_main(struct persistent_state *ps)
+     if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
+       ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
+     else
++    {
+       ui->eng = txp_create_tex_engine(ps->ctx, engine_path, using_texlive,
+                                       ps->stream_mode, ps->inclusion_path,
+                                       ps->doc_name, hooks);
++      olive_install(ps, ui);
++    }
+   }
+ 
+   ui->sdl_renderer = ps->renderer;
+@@ -1353,6 +2224,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -1467,7 +1891,7 @@ index c202294..275571e 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +1940,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +2284,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -1479,7 +1903,7 @@ index c202294..275571e 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2220,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2564,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -1488,7 +1912,7 @@ index c202294..275571e 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..9c780ec 100644
+index 3f0b8f5..711c37b 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -1533,7 +1957,7 @@ index 3f0b8f5..9c780ec 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +928,1392 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +928,1724 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -2795,6 +3219,338 @@ index 3f0b8f5..9c780ec 100644
 +  return get_input(buf, stx, tag - 1, name);
 +}
 +
++/* ---------------- elements (TikZ) ---------------- */
++
++/* the start of line l (from 1) and its length, in characters */
++static int el_line(const synctex_file *f, int l, int *len)
++{
++  if (l < 1 || l > f->nlines) { *len = 0; return -1; }
++  int a = f->line_off[l - 1];
++  int b = l < f->nlines ? f->line_off[l] - 1 : f->len;
++  *len = b - a;
++  return a;
++}
++
++/* the end of the code on a line: before an unescaped % */
++static int el_code_len(const int *s, int len)
++{
++  for (int i = 0; i < len; i++)
++  {
++    if (s[i] == '\\') { i++; continue; }
++    if (s[i] == '%') return i;
++  }
++  return len;
++}
++
++static int el_is_letter(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
++
++/* s[i..] is the word w (a command "\name" or a keyword), not a part of a
++   longer one */
++static int el_word_at(const int *s, int len, int i, const char *w)
++{
++  int n = (int)strlen(w);
++  if (i + n > len) return 0;
++  for (int k = 0; k < n; k++) if (s[i + k] != (unsigned char)w[k]) return 0;
++  if (i + n < len && el_is_letter(s[i + n])) return 0;
++  if (w[0] != '\\' && i > 0 && (el_is_letter(s[i - 1]) || s[i - 1] == '\\')) return 0;
++  return 1;
++}
++
++/* the column of the k-th (from 1) of the words on line l, -1 if none */
++static int el_find(const synctex_file *f, int l, const char *const *words, int k)
++{
++  int len, a = el_line(f, l, &len);
++  if (a < 0) return -1;
++  const int *s = f->text + a;
++  len = el_code_len(s, len);
++  int seen = 0;
++  for (int i = 0; i < len; i++)
++    for (int w = 0; words[w]; w++)
++      if (el_word_at(s, len, i, words[w]))
++      {
++        if (++seen == k) return i;
++        i += (int)strlen(words[w]) - 1;
++        break;
++      }
++  return -1;
++}
++
++/* from offset p (at an opening bracket), the offset after its closing one */
++static int el_skip_group(const synctex_file *f, int p, int limit)
++{
++  int depth = 0;
++  for (; p < limit; p++)
++  {
++    int c = f->text[p];
++    if (c == '\\') { p++; continue; }
++    if (c == '%') { while (p < limit && f->text[p] != '\n') p++; continue; }
++    if (c == '{' || c == '[' || c == '(') depth++;
++    else if (c == '}' || c == ']' || c == ')')
++    {
++      if (--depth <= 0) return p + 1;
++    }
++  }
++  return limit;
++}
++
++/* offset -> line (from 1), column */
++static void el_pos(const synctex_file *f, int p, int *l, int *c)
++{
++  int lo = 0, hi = f->nlines - 1;
++  while (lo < hi)
++  {
++    int m = (lo + hi + 1) / 2;
++    if (f->line_off[m] <= p) lo = m; else hi = m - 1;
++  }
++  *l = lo + 1;
++  *c = p - f->line_off[lo];
++}
++
++static const char *const el_path_cmds[] = {
++  "\\draw", "\\path", "\\fill", "\\filldraw", "\\shade", "\\shadedraw", "\\clip",
++  "\\node", "\\coordinate", "\\pic", "\\matrix", "\\graph", "\\useasboundingbox",
++  "\\datavisualization", "\\tikz", NULL };
++static const char *const el_node_words[] = { "\\node", "node", NULL };
++static const char *const el_to_words[] = { "to", NULL };
++static const char *const el_pic_begin[] = {
++  "\\begin{tikzpicture}", "\\begin{circuitikz}", "\\tikz", NULL };
++static const char *const el_scope_begin[] = { "\\begin{scope}", "\\scope", NULL };
++
++/* An element drawn by a macro, not by TikZ code in the file: the code of the
++   line that calls it. If that line ends an environment that collects its
++   body (e.g. a circuit of the template, drawn at \end{circuit}), the whole
++   environment, from its \begin. r->whole = 1. */
++static int el_macro_range(const synctex_file *f, int line, synctex_range *r)
++{
++  int len, a = el_line(f, line, &len);
++  if (a < 0) return 0;
++  const int *s = f->text + a;
++  int code = el_code_len(s, len), col = 0;
++  while (col < code && (s[col] == ' ' || s[col] == '\t')) col++;
++  r->l0 = r->l1 = line;
++  r->c0 = col;
++  r->c1 = code;
++  r->whole = 1;
++  /* \end{name} on the line: back to \begin{name} */
++  static const char end_word[] = "\\end{";
++  for (int i = col; i + 5 < code; i++)
++  {
++    int k = 0;
++    while (end_word[k] && s[i + k] == (unsigned char)end_word[k]) k++;
++    if (end_word[k]) continue;
++    int n0 = i + 5, n1 = n0;
++    while (n1 < code && s[n1] != '}') n1++;
++    if (n1 >= code) break;
++    /* "\begin{name}" as characters */
++    int want[80], wn = 0;
++    const char *b = "\\begin{";
++    while (*b && wn < 70) want[wn++] = *b++;
++    for (int q = n0; q <= n1 && wn < 79; q++) want[wn++] = s[q];
++    int depth = 0;
++    for (int l = line; l >= 1 && l > line - 2000; l--)
++    {
++      int ll, la = el_line(f, l, &ll);
++      const int *t = f->text + la;
++      int lc = el_code_len(t, ll);
++      for (int c = (l == line ? i : lc) - wn; c >= 0; c--)
++      {
++        int m = 0;
++        while (m < wn && t[c + m] == want[m]) m++;
++        if (m < wn) continue;
++        if (depth-- > 0) continue;
++        r->l0 = l;
++        r->c0 = c;
++        r->c1 = n1 + 1;
++        return 1;
++      }
++    }
++    break;
++  }
++  return 1;
++}
++
++int synctex_element_range(const synctex_file *f, const synctex_element *e, synctex_range *r)
++{
++  memset(r, 0, sizeof(*r));
++  if (!f || !f->text || e->line < 1 || e->line > f->nlines)
++    return 0;
++  int col = -1, l = e->line, start, end;
++  switch (e->kind)
++  {
++    case 'p': case 'n': case 't':
++    {
++      const char *const *words = e->kind == 'p' ? el_path_cmds :
++                                 e->kind == 'n' ? el_node_words : el_to_words;
++      col = el_find(f, l, words, e->index > 0 ? e->index : 1);
++      if (col < 0 && e->kind == 'p' && l > 1)
++      {
++        /* TeX may read the line after the command first (options) */
++        col = el_find(f, l - 1, words, 1);
++        if (col >= 0) l--;
++      }
++      if (col < 0)
++        return el_macro_range(f, e->line, r);
++      int len, a = el_line(f, l, &len);
++      start = a + col;
++      int last = e->end_line > l ? e->end_line + 1 : l + 2;
++      int la, limit = el_line(f, last <= f->nlines ? last : f->nlines, &la);
++      limit = last <= f->nlines ? limit + la : f->len;
++      int p = start + 1;
++      while (p < limit && f->text[p] != '\\' && el_is_letter(f->text[p])) p++;
++      if (e->kind == 't')
++      {
++        /* to[...] */
++        while (p < limit && f->text[p] == ' ') p++;
++        end = (p < limit && f->text[p] == '[') ? el_skip_group(f, p, limit) : p;
++      }
++      else if (e->kind == 'n')
++      {
++        /* node [...] (name) at (...) {text} */
++        end = p;
++        for (;;)
++        {
++          while (p < limit && (f->text[p] == ' ' || f->text[p] == '\n' || f->text[p] == '\t')) p++;
++          if (p >= limit) break;
++          int c = f->text[p];
++          if (c == '[' || c == '(') { p = el_skip_group(f, p, limit); end = p; continue; }
++          if (c == 'a' && p + 1 < limit && f->text[p + 1] == 't') { p += 2; continue; }
++          if (c == '{') end = el_skip_group(f, p, limit);
++          break;
++        }
++      }
++      else
++      {
++        /* the path: up to ; */
++        end = limit;
++        int depth = 0;
++        for (; p < limit; p++)
++        {
++          int c = f->text[p];
++          if (c == '\\') { p++; continue; }
++          if (c == '%') { while (p < limit && f->text[p] != '\n') p++; continue; }
++          if (c == '{' || c == '[' || c == '(') depth++;
++          else if (c == '}' || c == ']' || c == ')') depth--;
++          else if (c == ';' && depth <= 0) { end = p + 1; break; }
++        }
++      }
++      break;
++    }
++    case 'P': case 's':
++    {
++      const char *const *words = e->kind == 'P' ? el_pic_begin : el_scope_begin;
++      for (int k = 0; k < 4 && col < 0 && l - k >= 1; k++)
++        if ((col = el_find(f, l - k, words, 1)) >= 0) l -= k;
++      if (col < 0) return 0;
++      int len, a = el_line(f, l, &len);
++      start = a + col;
++      int el = e->end_line >= l ? e->end_line : l;
++      a = el_line(f, el, &len);
++      end = a + el_code_len(f->text + a, len);
++      break;
++    }
++    default:
++      return 0;
++  }
++  el_pos(f, start, &r->l0, &r->c0);
++  el_pos(f, end, &r->l1, &r->c1);
++  return 1;
++}
++
++static int el_same_file(const char *a, const char *b)
++{
++  while (a[0] == '.' && a[1] == '/') a += 2;
++  while (b[0] == '.' && b[1] == '/') b += 2;
++  return strcmp(a, b) == 0;
++}
++
++static int el_before(int l0, int c0, int l1, int c1)
++{
++  return l0 < l1 || (l0 == l1 && c0 <= c1);
++}
++
++int synctex_element_caret(const synctex_file *f, const char *path, const char *main_file,
++                          int line, int col, const synctex_element *els, int nels,
++                          int *x, int *y, int *h, int *d, synctex_caret_info *info)
++{
++  int best = -1;
++  long best_size = 0;
++  for (int i = 0; i < nels; i++)
++  {
++    const synctex_element *e = &els[i];
++    if (!e->has_box || !el_same_file(e->file[0] ? e->file : main_file, path))
++      continue;
++    synctex_range r;
++    if (!synctex_element_range(f, e, &r))
++      continue;
++    if (!el_before(r.l0, r.c0, line, col) || !el_before(line, col, r.l1, r.c1))
++      continue;
++    long size = (long)(f->line_off[r.l1 - 1] + r.c1) - (f->line_off[r.l0 - 1] + r.c0);
++    if (best < 0 || size < best_size || (size == best_size && e->depth > els[best].depth))
++    {
++      best = i;
++      best_size = size;
++    }
++  }
++  if (best < 0)
++    return 0;
++  /* the parts of the same element (e.g. a circuitikz part and its label);
++     for an element drawn by a macro, all that the macro draws */
++  const synctex_element *b = &els[best];
++  synctex_box box = {b->x0, b->y0, b->x1, b->y1};
++  synctex_range rb;
++  synctex_element_range(f, b, &rb);
++  for (int i = 0; i < nels; i++)
++  {
++    const synctex_element *e = &els[i];
++    if (!e->has_box || strcmp(e->file, b->file) != 0)
++      continue;
++    if (rb.whole)
++    {
++      synctex_range re;
++      if (!synctex_element_range(f, e, &re) || !re.whole || re.l0 != rb.l0 || re.c0 != rb.c0 ||
++          re.l1 != rb.l1)
++        continue;
++    }
++    else if (e->kind != b->kind || e->line != b->line || e->index != b->index)
++      continue;
++    if (e->x0 < box.x0) box.x0 = e->x0;
++    if (e->y0 < box.y0) box.y0 = e->y0;
++    if (e->x1 > box.x1) box.x1 = e->x1;
++    if (e->y1 > box.y1) box.y1 = e->y1;
++  }
++  /* text in a node keeps its caret (and box) when it is in the node */
++  int slack = 2 * 65536;
++  if ((b->kind == 'n' || b->kind == 't') && !rb.whole &&
++      *x >= box.x0 - slack && *x <= box.x1 + slack &&
++      *y >= box.y0 - slack && *y <= box.y1 + slack + *d)
++    return 1;
++  *x = box.x0;
++  *y = box.y1;
++  *h = box.y1 - box.y0;
++  *d = 0;
++  if (info) { info->has_box = 1; info->box = box; }
++  return 1;
++}
++
++int synctex_element_at(const synctex_element *els, int nels, int x, int y)
++{
++  int best = -1;
++  double best_area = 0;
++  for (int i = 0; i < nels; i++)
++  {
++    const synctex_element *e = &els[i];
++    if (!e->has_box || x < e->x0 || x > e->x1 || y < e->y0 || y > e->y1)
++      continue;
++    double area = (double)(e->x1 - e->x0) * (double)(e->y1 - e->y0);
++    if (best < 0 || area < best_area || (area == best_area && e->depth > els[best].depth))
++    {
++      best = i;
++      best_area = area;
++    }
++  }
++  return best;
++}
++
 +/* ---------------- backward ---------------- */
 +
 +struct box_env {
@@ -2927,7 +3683,7 @@ index 3f0b8f5..9c780ec 100644
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..7b334ba 100644
+index cfff199..41547cb 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -2938,7 +3694,7 @@ index cfff199..7b334ba 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,64 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,90 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -2975,6 +3731,18 @@ index cfff199..7b334ba 100644
 +  synctex_box *boxes;
 +  int nboxes, capboxes;
 +} synctex_caret_info;
++/* An element that TikZ marked in the live preview (a path, a node, the
++   part that a to[...] draws): its source, and the box of what it draws, in
++   SyncTeX units */
++typedef struct {
++  char kind;              /* 'p' path, 'n' node, 't' node of the index-th to[...] of line */
++  int line, end_line;     /* end_line: of a path, where it ends (0: not known) */
++  int index;              /* n: index of the node on its line; t: of the to[...] */
++  int depth;              /* 0: not in another element */
++  int x0, y0, x1, y1, has_box;
++  char file[512];         /* the file as TeX read it ("dir/name"); "" = the main file */
++} synctex_element;
++
 +/* A source file as Unicode characters, lines joined with '\n'; line i
 +   (from 1) starts at line_off[i - 1] */
 +typedef struct { const int *text; int len; const int *line_off; int nlines; } synctex_file;
@@ -3002,6 +3770,20 @@ index cfff199..7b334ba 100644
 +                        const char *doc_dir, unsigned page, int x, int y);
  int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *page, int *x, int *y);
  
++/* The source of an element in file f: from line l0, column c0 (its command)
++   to l1, c1 */
++typedef struct { int l0, c0, l1, c1, whole; } synctex_range;   /* whole: see el_macro_range */
++int synctex_element_range(const synctex_file *f, const synctex_element *e, synctex_range *r);
++/* The caret of line, col (of path, file f) in an element of the page: the
++   smallest element around it. Returns 0 if none; else sets the caret (at
++   the start of the element's box) and info->box, except for text in a node
++   when *x, *y is already on it. */
++int synctex_element_caret(const synctex_file *f, const char *path, const char *main_file,
++                          int line, int col, const synctex_element *els, int nels,
++                          int *x, int *y, int *h, int *d, synctex_caret_info *info);
++/* The smallest element at x, y; -1 if none */
++int synctex_element_at(const synctex_element *els, int nels, int x, int y);
++
  #endif // SYNCTEX_H_
 -- 
 2.43.0

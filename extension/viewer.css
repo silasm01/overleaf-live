@@ -129,3 +129,6 @@
 .olive-debug-box { position: absolute; box-sizing: border-box; border: 1px dashed #f08c00; }
 .olive-debug label.olive-debug-sub { font-weight: 400 !important; margin: 3px 0 0 20px !important; }
 .olive-debug label:has(input:disabled) { color: #999 !important; cursor: default; }
+.olive-debug-el { position: absolute; box-sizing: border-box; border: 1px solid; }
+.olive-debug-el > span { position: absolute; left: 0; top: -9px; font: 8px/1 ui-monospace, monospace;
+  background: rgba(255,255,255,.75); padding: 0 1px; white-space: nowrap; }

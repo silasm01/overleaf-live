@@ -489,6 +489,8 @@ function onLine(run, line) {
     send(caret);
   } else if (line.startsWith('(synctex-debug ')) {
     send(parseCaretDebug(line));
+  } else if (line.startsWith('(synctex-elements ')) {
+    send(parseElements(line));
   } else if ((m = line.match(backRe))) {
     let path = unescape(m[1]);
     if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
@@ -517,6 +519,22 @@ function parseCaretDebug(line) {
   const boxes = [];
   for (let k = 0; k < m; k++, i += 4) boxes.push(v.slice(i, i + 4));
   return { type: 'caretDebug', page, points, boxes };
+}
+
+// (synctex-elements page n kind line end index depth x0 y0 x1 y1 "file" l0 c0 l1 c1 ...):
+// the TikZ elements of a page (debug panel)
+function parseElements(line) {
+  const toks = [];
+  const re = /"((?:[^"\\]|\\.)*)"|[^\s()]+/g;
+  let m;
+  while ((m = re.exec(line))) toks.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : m[0]);
+  const page = +toks[1], n = +toks[2], elements = [];
+  for (let i = 3, k = 0; k < n; k++, i += 14) {
+    elements.push({ kind: toks[i], line: +toks[i + 1], end: +toks[i + 2], index: +toks[i + 3],
+      depth: +toks[i + 4], box: toks.slice(i + 5, i + 9).map(Number), file: toks[i + 9],
+      src: toks.slice(i + 10, i + 14).map(Number) });
+  }
+  return { type: 'caretElements', page, elements };
 }
 
 function reportErrors(run) {
@@ -605,6 +623,9 @@ const handlers = {
   },
   lua(client, msg) { P.lua = !!msg.on; },
   // the caret map of every source line on one page (debug panel, whole page)
+  caretElements(client, msg) {
+    if (P.run) command(`(caret-elements ${Math.max(0, msg.page | 0)})`);
+  },
   caretMap(client, msg) {
     if (P.run) command(`(caret-map ${Math.max(0, msg.page | 0)})`);
   },
