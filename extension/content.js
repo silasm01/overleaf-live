@@ -574,28 +574,50 @@
     const hint = document.createElement("span");
     hint.className = "olive-field-hint";
     hint.textContent = "Enter: save · Esc: cancel";
-    box.append(input, hint);
+    box.append(input);
+    // values the module offers (e.g. gate types): a click puts one in place
+    // of the field and saves; typing still works for any other value
+    if (f.options && f.options.length) {
+      const list = document.createElement("div");
+      list.className = "olive-field-options";
+      const [s0, s1] = f.sel || [0, f.text.length];
+      for (const opt of f.options) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = opt;
+        if (opt === f.text.slice(s0, s1)) b.classList.add("olive-current");
+        b.addEventListener("mousedown", (e) => e.preventDefault());   // keep the focus in the box
+        b.addEventListener("click", (e) => {
+          e.stopPropagation();
+          input.value = f.text.slice(0, s0) + opt + f.text.slice(s1);
+          save();
+        });
+        list.appendChild(b);
+      }
+      box.appendChild(list);
+    }
+    box.append(hint);
     const w = +slot.dataset.w || pageSize.w, h = +slot.dataset.h || pageSize.h;
     box.style.left = (f.box[0] / w * 100) + "%";
     box.style.top = (f.box[3] / h * 100) + "%";
     slot.appendChild(box);
     fieldEl = box;
     for (const ev of ["mousedown", "dblclick", "wheel"]) box.addEventListener(ev, (e) => e.stopPropagation());
+    function save() {
+      const text = input.value;
+      closeField();
+      if (text === f.text) return;
+      if (!docId || pathOf(docId) !== f.path) {
+        setStatus(`quick edit not saved: ${f.path} is not open in the editor`, false);
+        return;
+      }
+      window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: f.from[0], column: f.from[1],
+        toLine: f.to[0], toColumn: f.to[1], expect: f.text, text }, location.origin);
+    }
     input.addEventListener("keydown", (e) => {
       e.stopPropagation();
       if (e.key === "Escape") { e.preventDefault(); closeField(); }
-      if (e.key === "Enter") {
-        e.preventDefault();
-        const text = input.value;
-        closeField();
-        if (text === f.text) return;
-        if (!docId || pathOf(docId) !== f.path) {
-          setStatus(`quick edit not saved: ${f.path} is not open in the editor`, false);
-          return;
-        }
-        window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: f.from[0], column: f.from[1],
-          toLine: f.to[0], toColumn: f.to[1], expect: f.text, text }, location.origin);
-      }
+      if (e.key === "Enter") { e.preventDefault(); save(); }
     });
     // the editor takes the focus when it opens the file and selects the
     // field: in the first 3 s the box takes it back, later a blur closes it
@@ -612,6 +634,59 @@
       if (f.sel) input.setSelectionRange(f.sel[0], f.sel[1]);
       else input.select();
     }, 250);
+  }
+
+  // A choice (a K-map cell: 0, 1 or D): a small menu on the page; a click
+  // makes the edits of that value in the editor (page.js checks that the
+  // source is still the same). Esc or a click elsewhere closes it.
+  function openChoice(c) {
+    closeField();
+    if (detached || scanPage < 0) return;
+    const slot = slots()[scanPage];
+    if (!slot) return;
+    const box = document.createElement("div");
+    box.className = "olive-field olive-choice";
+    const list = document.createElement("div");
+    list.className = "olive-field-options";
+    for (const o of c.options) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = o.label;
+      if (o.label === c.current) b.classList.add("olive-current");
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeField();
+        if (!o.edits.length) return;
+        if (!docId || pathOf(docId) !== c.path) {
+          setStatus(`not changed: ${c.path} is not open in the editor`, false);
+          return;
+        }
+        window.postMessage({ [TAG + "Cmd"]: "replace", docId,
+          edits: o.edits.map(ed => ({ line: ed.from[0], column: ed.from[1], toLine: ed.to[0],
+                                      toColumn: ed.to[1], expect: ed.old, text: ed.text })) },
+          location.origin);
+      });
+      list.appendChild(b);
+    }
+    const hint = document.createElement("span");
+    hint.className = "olive-field-hint";
+    hint.textContent = "Esc: cancel";
+    box.append(list, hint);
+    const w = +slot.dataset.w || pageSize.w, h = +slot.dataset.h || pageSize.h;
+    box.style.left = (c.box[0] / w * 100) + "%";
+    box.style.top = (c.box[3] / h * 100) + "%";
+    slot.appendChild(box);
+    fieldEl = box;
+    for (const ev of ["mousedown", "dblclick", "wheel"]) box.addEventListener(ev, (e) => e.stopPropagation());
+    const off = (e) => {
+      if (fieldEl !== box) { document.removeEventListener("mousedown", off, true); document.removeEventListener("keydown", esc, true); return; }
+      if (!box.contains(e.target)) closeField();
+    };
+    const esc = (e) => { if (e.key === "Escape" && fieldEl === box) { e.preventDefault(); closeField(); } };
+    setTimeout(() => {
+      document.addEventListener("mousedown", off, true);
+      document.addEventListener("keydown", esc, true);
+    }, 0);
   }
 
   // --- the debug panel (Alt+Shift+G) -------------------------------------
@@ -1010,6 +1085,10 @@
         break;
       case "field":
         pendingField = msg;
+        break;
+      case "choice":
+        pendingField = null;
+        openChoice(msg);
         break;
       case "apply":
         // a change made at once (a K-map cell toggled): page.js checks that

@@ -476,8 +476,9 @@ const backRe = /^\(synctex "(.*)" (-?\d+) (-?\d+)\)$/;
 // (synctex-field "path" l0 c0 l1 c1 x0 y0 x1 y1 "text" sel0 sel1 shared):
 // quick edit, the source text of the double-clicked field (sent before its
 // (synctex ...)); sel0..sel1: the field in the text (the text can be the
-// whole short command call); shared 1: the field shows in several places
-const fieldRe = /^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01]))?\)$/;
+// whole short command call); shared 1: the field shows in several places;
+// "a,b,c": values to offer in a list (from the module)
+const fieldRe = /^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01])(?: "((?:[^"\\]|\\.)*)")?)?\)$/;
 // (synctex-apply "path" l0 c0 l1 c1 "old" "new"): a change to make at once
 // (a K-map cell: its number added to or removed from \minterms{...})
 const applyRe = /^\(synctex-apply "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)"\)$/;
@@ -507,7 +508,14 @@ function onLine(run, line) {
     const rel = safeRel(path);
     if (rel) send({ type: 'field', path: rel, from: [+m[2], +m[3]], to: [+m[4], +m[5]],
       box: [+m[6], +m[7], +m[8], +m[9]], text: unescape(m[10]),
-      sel: m[11] ? [+m[11], +m[12]] : null, shared: m[13] === '1' });
+      sel: m[11] ? [+m[11], +m[12]] : null, shared: m[13] === '1',
+      options: m[14] ? unescape(m[14]).split(',').filter(Boolean) : [] });
+  } else if (line.startsWith('(synctex-choice ')) {
+    const c = parseChoice(line);
+    let path = c.path;
+    if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
+    const rel = safeRel(path);
+    if (rel) send({ ...c, path: rel });
   } else if ((m = line.match(applyRe))) {
     let path = unescape(m[1]);
     if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
@@ -542,6 +550,28 @@ function parseCaretDebug(line) {
   const boxes = [];
   for (let k = 0; k < m; k++, i += 4) boxes.push(v.slice(i, i + 4));
   return { type: 'caretDebug', page, points, boxes };
+}
+
+// (synctex-choice "path" x0 y0 x1 y1 "current" n "label" m l0 c0 l1 c1 "old" "new" ...):
+// the values to offer for a double-clicked cell (K-map: 0, 1, D), each with
+// the edits that give it (none for the value now)
+function parseChoice(line) {
+  const toks = [];
+  const re = /"((?:[^"\\]|\\.)*)"|[^\s()]+/g;
+  let m;
+  while ((m = re.exec(line))) toks.push(m[1] !== undefined ? unescape(m[1]) : m[0]);
+  let i = 1;
+  const path = toks[i++], box = toks.slice(i, i + 4).map(Number);
+  i += 4;
+  const current = toks[i++], n = +toks[i++], options = [];
+  for (let k = 0; k < n; k++) {
+    const label = toks[i++], ne = +toks[i++], edits = [];
+    for (let e = 0; e < ne; e++, i += 6)
+      edits.push({ from: [+toks[i], +toks[i + 1]], to: [+toks[i + 2], +toks[i + 3]],
+                   old: toks[i + 4], text: toks[i + 5] });
+    options.push({ label, edits });
+  }
+  return { type: 'choice', path, box, current, options };
 }
 
 // (synctex-elements page n kind line end index depth x0 y0 x1 y1 "file" l0 c0 l1 c1 ...):

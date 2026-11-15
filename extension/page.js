@@ -144,7 +144,19 @@
     if (cmd === "replace") {
       const d = evt.data;
       let ok = false, why = "the file is not open in the editor";
-      if (view && d.docId === docId) {
+      if (view && d.docId === docId && Array.isArray(d.edits)) {
+        // several edits at once (a K-map cell: \minterms and \dontcares),
+        // all or none; positions are in the text before the edits
+        const ch = d.edits.map(e => ({ from: offsetOf(e.line, e.column), to: offsetOf(e.toLine, e.toColumn),
+                                       insert: e.text, expect: e.expect }))
+                          .sort((a, b) => a.from - b.from);
+        if (ch.some(c => view.state.doc.sliceString(c.from, c.to) !== c.expect)) why = "the text changed";
+        else if (ch.some((c, i) => i > 0 && c.from < ch[i - 1].to)) why = "the edits overlap";
+        else {
+          view.dispatch({ changes: ch.map(({ from, to, insert }) => ({ from, to, insert })) });
+          ok = true;
+        }
+      } else if (view && d.docId === docId) {
         const from = offsetOf(d.line, d.column), to = offsetOf(d.toLine, d.toColumn);
         if (view.state.doc.sliceString(from, to) !== d.expect) why = "the text changed";
         else {

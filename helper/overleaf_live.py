@@ -243,7 +243,7 @@ class Project:
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
         caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?( element)?\)$')
         back_re = re.compile(r'^\(synctex "(.*)" (-?\d+) (-?\d+)\)$')
-        field_re = re.compile(r'^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01]))?\)$')
+        field_re = re.compile(r'^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01])(?: "((?:[^"\\]|\\.)*)")?)?\)$')
         apply_re = re.compile(r'^\(synctex-apply "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)"\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
@@ -288,7 +288,16 @@ class Project:
                                      "from": [int(m[2]), int(m[3])], "to": [int(m[4]), int(m[5])],
                                      "box": [float(m[i]) for i in range(6, 10)], "text": text,
                                      "sel": [int(m[11]), int(m[12])] if m[11] else None,
-                                     "shared": m[13] == "1"})
+                                     "shared": m[13] == "1",
+                                     "options": [o for o in unesc_sexp(m[14]).split(",") if o]
+                                     if m[14] else []})
+                continue
+            if line.startswith("(synctex-choice "):
+                c = parse_choice(line)
+                rel = self.project_path(c["path"])
+                if rel:
+                    c["path"] = rel
+                    await self.send(c)
                 continue
             m = apply_re.match(line)
             if m:
@@ -507,6 +516,33 @@ def parse_caret_debug(line):
     i += 1
     boxes = [v[i + 4 * k:i + 4 * k + 4] for k in range(m)]
     return {"type": "caretDebug", "page": page, "points": points, "boxes": boxes}
+
+
+def unesc_sexp(t):
+    return re.sub(r'\\(.)', lambda k: "\n" if k[1] == "n" else k[1], t)
+
+
+def parse_choice(line):
+    """(synctex-choice "path" x0 y0 x1 y1 "current" n "label" m l0 c0 l1 c1 "old" "new" ...)"""
+    toks = [unesc_sexp(a) if a is not None and b == "" else b
+            for a, b in re.findall(r'"((?:[^"\\]|\\.)*)"|([^\s()]+)', line)]
+    toks = [t for t in toks]
+    i = 1
+    path, box = toks[i], [float(v) for v in toks[i + 1:i + 5]]
+    i += 5
+    current, n = toks[i], int(toks[i + 1])
+    i += 2
+    options = []
+    for _ in range(n):
+        label, ne = toks[i], int(toks[i + 1])
+        i += 2
+        edits = []
+        for _ in range(ne):
+            edits.append({"from": [int(toks[i]), int(toks[i + 1])], "to": [int(toks[i + 2]), int(toks[i + 3])],
+                          "old": toks[i + 4], "text": toks[i + 5]})
+            i += 6
+        options.append({"label": label, "edits": edits})
+    return {"type": "choice", "path": path, "box": box, "current": current, "options": options}
 
 
 def parse_elements(line):

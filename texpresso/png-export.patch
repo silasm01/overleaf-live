@@ -1,4 +1,4 @@
-From 34abde229a30b4c31378f4946febba3d1629162f Mon Sep 17 00:00:00 2001
+From 33886aafff1467728a59ecde9a7d78f9684d79e9 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -17,10 +17,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  105 +-
  src/frontend/editor.h             |   34 +
  src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 1252 +++++++++++++
- src/frontend/synctex.c            | 2871 ++++++++++++++++++++++++++++-
- src/frontend/synctex.h            |  132 ++
- 14 files changed, 4795 insertions(+), 61 deletions(-)
+ src/frontend/main.c               | 1307 +++++++++++++
+ src/frontend/synctex.c            | 3001 ++++++++++++++++++++++++++++-
+ src/frontend/synctex.h            |  146 ++
+ 14 files changed, 4994 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -1063,10 +1063,10 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..1fb8d65 100644
+index c202294..a6f1794 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1056 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1111 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1431,7 +1431,7 @@ index c202294..1fb8d65 100644
 +             part[0][0] && part[0][strlen(part[0]) - 1] != '/' ? "/" : "", part[1]);
 +  /* a module marker (kind c): its command name and action */
 +  if (kind == 'c')
-+    sscanf(q, " %39s %79s", e->name, e->action);
++    sscanf(q, " %39s %255s", e->name, e->action);
 +  int depth = 0;
 +  for (int i = 0; i < slot; i++)
 +    if (dev->layer[i] == LAYER_ELEMENT) depth++;
@@ -1897,6 +1897,55 @@ index c202294..1fb8d65 100644
 +    int k = synctex_element_at(els, ne, x, y);
 +    if (!(k >= 0 && els[k].kind == 'c') && hit >= 0)
 +      k = hit;
++    if (k >= 0 && els[k].kind == 'c' && !strncmp(els[k].action, "cell:", 5))
++    {
++      /* a choice (a K-map cell: 0, 1 or D): the values and their edits */
++      const synctex_element *e = &els[k];
++      const char *name = e->file[0] ? e->file : main_file_name(ps);
++      synctex_file file;
++      static synctex_choice_t ch;
++      int done = 0;
++      if (caret_file(ps->ctx, ps->doc_path, name, (int)strlen(name), &file))
++      {
++        if (synctex_element_choice(&file, e, &ch))
++        {
++          char full[2048];
++          if (name[0] == '/') snprintf(full, sizeof full, "%s", name);
++          else snprintf(full, sizeof full, "%s/%s", ps->doc_path, name);
++          float fs = send(scale_factor, ui->eng);
++          printf("(synctex-choice ");
++          print_sexp_string(full);
++          printf(" %.2f %.2f %.2f %.2f ", fs * ch.box.x0, fs * ch.box.y0, fs * ch.box.x1,
++                 fs * ch.box.y1);
++          print_sexp_string(ch.current);
++          printf(" %d", ch.nopts);
++          for (int i = 0; i < ch.nopts; i++)
++          {
++            printf(" ");
++            print_sexp_string(ch.opts[i].label);
++            printf(" %d", ch.opts[i].nedits);
++            for (int j = 0; j < ch.opts[i].nedits; j++)
++            {
++              const synctex_edit *ed = &ch.opts[i].edits[j];
++              printf(" %d %d %d %d ", ed->l0, ed->c0, ed->l1, ed->c1);
++              print_sexp_string(ed->old);
++              printf(" ");
++              print_sexp_string(ed->text);
++            }
++          }
++          printf(")\n");
++          fprintf(stderr, "[synctex scan] choice %s line %d: %s\n", name, e->line, e->action);
++          done = 1;
++        }
++        caret_file_free(ps->ctx, &file);
++      }
++      if (done)
++      {
++        fz_free(ps->ctx, els);
++        drop_glyphs(ps->ctx, glyphs, ng);
++        return 1;
++      }
++    }
 +    if (k >= 0 && els[k].kind == 'c' && !strncmp(els[k].action, "toggle:", 7))
 +    {
 +      const synctex_element *e = &els[k];
@@ -1981,7 +2030,13 @@ index c202294..1fb8d65 100644
 +  printf(" %d %d %d %d %.2f %.2f %.2f %.2f ", f.l0, f.c0, f.l1, f.c1,
 +         fs * f.box.x0, fs * f.box.y0, fs * f.box.x1, fs * f.box.y1);
 +  print_sexp_string(f.text);
-+  printf(" %d %d %d)\n", f.sel0, f.sel1, f.shared);
++  printf(" %d %d %d", f.sel0, f.sel1, f.shared);
++  if (f.options[0])
++  {
++    printf(" ");
++    print_sexp_string(f.options);
++  }
++  printf(")\n");
 +  fprintf(stderr, "[synctex scan] field %s:%d:%d-%d:%d \"%s\"\n", f.file, f.l0, f.c0, f.l1, f.c1, f.text);
 +  editor_synctex(ps->doc_path, f.file, (int)strlen(f.file), f.l0, f.c0);
 +  return 1;
@@ -2123,7 +2178,7 @@ index c202294..1fb8d65 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1967,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2022,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -2249,7 +2304,7 @@ index c202294..1fb8d65 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +2238,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +2293,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -2269,7 +2324,7 @@ index c202294..1fb8d65 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +2266,37 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +2321,37 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -2307,7 +2362,7 @@ index c202294..1fb8d65 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +2342,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +2397,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -2341,7 +2396,7 @@ index c202294..1fb8d65 100644
    }
  }
  
-@@ -1234,9 +2469,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +2524,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -2354,7 +2409,7 @@ index c202294..1fb8d65 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1353,6 +2591,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +2646,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -2369,7 +2424,7 @@ index c202294..1fb8d65 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +2651,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +2706,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -2381,7 +2436,7 @@ index c202294..1fb8d65 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2931,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2986,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -2390,7 +2445,7 @@ index c202294..1fb8d65 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..f57746b 100644
+index 3f0b8f5..4394f48 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -2534,7 +2589,7 @@ index 3f0b8f5..f57746b 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +1004,2782 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +1004,2912 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -4839,7 +4894,9 @@ index 3f0b8f5..f57746b 100644
 +  if (e->kind == 'c')
 +  {
 +    /* a module marker: "arg:N" the N-th { } argument, "key:N" its first
-+       key, "paren:N" the N-th ( ) argument */
++       key, "paren:N" the N-th ( ) argument; "...|a,b,c": values to offer */
++    const char *bar = strchr(e->action, '|');
++    if (bar) snprintf(out->options, sizeof out->options, "%s", bar + 1);
 +    int n = 0, key = 0, open = '{';
 +    if (sscanf(e->action, "arg:%d", &n) != 1)
 +    {
@@ -5004,6 +5061,134 @@ index 3f0b8f5..f57746b 100644
 +    tl += snprintf(out->newtext + tl, sizeof(out->newtext) - tl, i ? ",%d" : "%d", v[i]);
 +  el_pos(f, a, &out->l0, &out->c0);
 +  el_pos(f, b, &out->l1, &out->c1);
++  out->box = (synctex_box){e->x0, e->y0, e->x1, e->y1};
++  out->ok = 1;
++  return 1;
++}
++
++/* the first \name{...} in [a, b): the call [*c0, *c1) and its argument
++   [*a0, *a1); 0 if none */
++static int find_call(const synctex_file *f, int a, int b, const char *name,
++                     int *c0, int *c1, int *a0, int *a1)
++{
++  char cmd[48];
++  snprintf(cmd, sizeof cmd, "\\%s", name);
++  const int *t = f->text;
++  for (int i = a; i < b; i++)
++  {
++    if (t[i] == '%' && !is_esc(t, i)) { while (i < b && t[i] != '\n') i++; continue; }
++    if (t[i] != '\\' || !el_word_at(t, b, i, cmd)) continue;
++    int q = i + (int)strlen(cmd);
++    while (q < b && t[q] == ' ') q++;
++    if (q >= b || t[q] != '{') continue;
++    int e = el_skip_group(f, q, b);
++    *c0 = i; *c1 = e; *a0 = q + 1; *a1 = e - 1;
++    return 1;
++  }
++  return 0;
++}
++
++static void edit_set(const synctex_file *f, synctex_edit *ed, int a, int b, const char *text)
++{
++  el_pos(f, a, &ed->l0, &ed->c0);
++  el_pos(f, b, &ed->l1, &ed->c1);
++  int n = 0;
++  for (int i = a; i < b && n < (int)sizeof(ed->old) - 4; i++)
++  {
++    int c = f->text[i];
++    if (c < 0x80) ed->old[n++] = (char)c;
++    else if (c < 0x800) { ed->old[n++] = 0xC0 | (c >> 6); ed->old[n++] = 0x80 | (c & 0x3F); }
++    else { ed->old[n++] = 0xE0 | ((c >> 12) & 0x0F); ed->old[n++] = 0x80 | ((c >> 6) & 0x3F); ed->old[n++] = 0x80 | (c & 0x3F); }
++  }
++  ed->old[n] = 0;
++  snprintf(ed->text, sizeof ed->text, "%s", text);
++}
++
++static void list_text(const int *v, int n, char *out, int cap)
++{
++  int tl = 0;
++  out[0] = 0;
++  for (int i = 0; i < n && tl < cap - 8; i++)
++    tl += snprintf(out + tl, cap - tl, i ? ",%d" : "%d", v[i]);
++}
++
++/* The edits that make one list (\name{...}) hold or not hold val: none if
++   it already does; a new call after the point ins if there is none; the
++   whole call (and its line, if alone on it) away if it becomes empty */
++static int list_edit(const synctex_file *f, int a, int b, int ins, const char *name,
++                     int val, int want, synctex_edit *ed)
++{
++  int c0, c1, a0, a1;
++  const int *t = f->text;
++  if (!find_call(f, a, b, name, &c0, &c1, &a0, &a1))
++  {
++    if (!want) return 0;
++    char text[64];
++    snprintf(text, sizeof text, "\n  \\%s{%d}", name, val);
++    edit_set(f, ed, ins, ins, text);
++    return 1;
++  }
++  int v[256];
++  int n = toggle_list(t, a0, a1, v, 255);
++  if (n < 0) return 0;
++  int has = -1;
++  for (int i = 0; i < n; i++) if (v[i] == val) has = i;
++  if ((has >= 0) == !!want) return 0;
++  if (want) v[n++] = val; else v[has] = v[--n];
++  qsort(v, n, sizeof(int), cmp_int);
++  if (n == 0)
++  {
++    /* an empty list: the call away, with its line if nothing else is on it */
++    int l0 = c0, l1 = c1;
++    while (l0 > 0 && (t[l0 - 1] == ' ' || t[l0 - 1] == '\t')) l0--;
++    int r = l1;
++    while (r < f->len && (t[r] == ' ' || t[r] == '\t')) r++;
++    if ((l0 == 0 || t[l0 - 1] == '\n') && (r >= f->len || t[r] == '\n'))
++    {
++      if (r < f->len) r++;
++      edit_set(f, ed, l0, r, "");
++    }
++    else edit_set(f, ed, c0, c1, "");
++    return 1;
++  }
++  char text[300];
++  list_text(v, n, text, sizeof text);
++  edit_set(f, ed, a0, a1, text);
++  return 1;
++}
++
++int synctex_element_choice(const synctex_file *f, const synctex_element *e,
++                           synctex_choice_t *out)
++{
++  memset(out, 0, sizeof(*out));
++  int val;
++  char cur[16];
++  if (e->kind != 'c' || sscanf(e->action, "cell:%d:%15s", &val, cur) != 2)
++    return 0;
++  synctex_range er;
++  if (!el_env_range(f, e->line, &er))
++    return 0;
++  int a = f->line_off[er.l0 - 1] + er.c0, b = f->line_off[er.l1 - 1] + er.c1;
++  if (b > f->len) b = f->len;
++  /* a new list goes after \minterms, or at the end of the \begin line */
++  int ins0 = a;
++  while (ins0 < b && f->text[ins0] != '\n') ins0++;
++  int ins = ins0, c0, c1, a0, a1;
++  if (find_call(f, a, b, "minterms", &c0, &c1, &a0, &a1)) ins = c1;
++  static const char *labels[3] = {"0", "1", "D"};
++  for (int k = 0; k < 3; k++)
++  {
++    synctex_option *o = &out->opts[out->nopts++];
++    snprintf(o->label, sizeof o->label, "%s", labels[k]);
++    if (!strcmp(cur, labels[k])) continue;   /* the value now */
++    int m = list_edit(f, a, b, ins, "minterms", val, k == 1, &o->edits[o->nedits]);
++    /* \minterms away: a new \dontcares goes after the \begin line */
++    int gone = m && !o->edits[o->nedits].text[0];
++    o->nedits += m;
++    o->nedits += list_edit(f, a, b, gone ? ins0 : ins, "dontcares", val, k == 2,
++                           &o->edits[o->nedits]);
++  }
++  snprintf(out->current, sizeof out->current, "%s", cur);
 +  out->box = (synctex_box){e->x0, e->y0, e->x1, e->y1};
 +  out->ok = 1;
 +  return 1;
@@ -5318,7 +5503,7 @@ index 3f0b8f5..f57746b 100644
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..515bf39 100644
+index cfff199..39f801f 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -5329,7 +5514,7 @@ index cfff199..515bf39 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,137 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,151 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -5383,7 +5568,7 @@ index cfff199..515bf39 100644
 +     double-click does: "arg:N" edit the N-th {} argument, "key:N" the
 +     first key of it, "toggle:LIST:V" add V to or remove it from \LIST{...} */
 +  char name[40];
-+  char action[80];
++  char action[256];
 +} synctex_element;
 +
 +/* A source file as Unicode characters, lines joined with '\n'; line i
@@ -5450,7 +5635,21 @@ index cfff199..515bf39 100644
 +  char file[512];          /* the source file, relative to the document */
 +  char text[1300];         /* the source text (UTF-8) */
 +  char newtext[300];       /* a toggle: the new text of l0 c0 .. l1 c1 (text: the old) */
++  char options[256];       /* values to offer in a list ("and,or,not"), from the module */
 +} synctex_field_t;
++/* A choice of a module marker (action "cell:N:V", a K-map cell): the values
++   to offer; each with the edits that give it (none: the value now) */
++typedef struct { int l0, c0, l1, c1; char old[300]; char text[300]; } synctex_edit;
++typedef struct { char label[16]; int nedits; synctex_edit edits[3]; } synctex_option;
++typedef struct {
++  int ok;
++  synctex_box box;
++  char current[16];
++  int nopts;
++  synctex_option opts[4];
++} synctex_choice_t;
++int synctex_element_choice(const synctex_file *f, const synctex_element *e,
++                           synctex_choice_t *out);
 +typedef int (*synctex_load_fn)(void *env, const char *path, int len, synctex_file *f);
 +typedef void (*synctex_free_fn)(void *env, synctex_file *f);
 +/* The field of a plot line (element kind L, or a path with "plot"): its
