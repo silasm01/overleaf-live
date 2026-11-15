@@ -472,10 +472,10 @@ index 3096732..3d14cd4 100644
  txp_client *txp_connect(FILE *file)
  {
 diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
-index 5d275b2..7a5f44f 100644
+index 4e2c078..3d7eb99 100644
 --- a/src/frontend/engine_tex.c
 +++ b/src/frontend/engine_tex.c
-@@ -137,6 +137,19 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q);
+@@ -217,6 +217,19 @@ static int olive_alias(struct tex_engine *self, fileentry_t *w, const char *name
  
  // Launching processes
  
@@ -495,7 +495,7 @@ index 5d275b2..7a5f44f 100644
  static pid_t exec_xelatex_generic(char **args, int *fd)
  {
    int sockets[2];
-@@ -186,6 +199,7 @@ static pid_t exec_xelatex_generic(char **args, int *fd)
+@@ -266,6 +279,7 @@ static pid_t exec_xelatex_generic(char **args, int *fd)
    *fd = sockets[0];
    return pid;
  }
@@ -503,7 +503,7 @@ index 5d275b2..7a5f44f 100644
  
  static pid_t exec_xelatex(char *engine_path, bool use_texlive, const char *filename, int *fd)
  {
-@@ -223,8 +237,13 @@ static void close_process(process_t *p)
+@@ -303,8 +317,13 @@ static void close_process(process_t *p)
  {
    if (p->fd != -1)
    {
@@ -517,7 +517,7 @@ index 5d275b2..7a5f44f 100644
      p->fd = -1;
    }
  }
-@@ -587,9 +606,136 @@ static bool need_snapshot(fz_context *ctx, struct tex_engine *self, int time)
+@@ -667,9 +686,136 @@ static bool need_snapshot(fz_context *ctx, struct tex_engine *self, int time)
      last_time = 0;
    }
  
@@ -654,7 +654,7 @@ index 5d275b2..7a5f44f 100644
  static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q)
  {
    process_t *p = get_process(self);
-@@ -608,6 +754,11 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q)
+@@ -688,6 +834,11 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q)
        char fs_path_buffer[1024];
        const char *fs_path = NULL;
  
@@ -666,7 +666,7 @@ index 5d275b2..7a5f44f 100644
        if (q->tag == Q_OPRD)
        {
          e = filesystem_lookup(self->fs, q->open.path);
-@@ -1168,7 +1319,21 @@ static int compute_fences(fz_context *ctx, struct tex_engine *self, int trace, i
+@@ -1253,7 +1404,21 @@ static int compute_fences(fz_context *ctx, struct tex_engine *self, int trace, i
    while (target_process >= 0 && self->processes[target_process].trace_len > trace)
      target_process -= 1;
    int target_trace = target_process >= 0 ? self->processes[target_process].trace_len : -1;
@@ -688,7 +688,7 @@ index 5d275b2..7a5f44f 100644
    {
      if (self->trace[trace].time <= time && possible_fence(&self->trace[trace]))
      {
-@@ -1680,6 +1845,51 @@ static fileentry_t *engine_find_file(txp_engine *_self, fz_context *ctx, const c
+@@ -1765,6 +1930,51 @@ static fileentry_t *engine_find_file(txp_engine *_self, fz_context *ctx, const c
    return filesystem_lookup_or_create(ctx, self->fs, path);
  }
  
@@ -741,10 +741,10 @@ index 5d275b2..7a5f44f 100644
                                    const char *engine_path,
                                    bool use_texlive,
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index ab69913..3155f0d 100644
+index be3745d..44ea26e 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -1218,6 +1218,19 @@ static void caret_page_map(struct persistent_state *ps, ui_state *ui, int page)
+@@ -1230,6 +1230,19 @@ static void caret_page_map(struct persistent_state *ps, ui_state *ui, int page)
  
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
@@ -764,7 +764,7 @@ index ab69913..3155f0d 100644
    const char *rel_path = path, *dir_path = dir;
  
    // Skip common parts
-@@ -1908,7 +1921,12 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1920,7 +1933,12 @@ static void interpret_command(struct persistent_state *ps,
        }
        else
        {
@@ -777,7 +777,7 @@ index ab69913..3155f0d 100644
          synctex_set_target_column(stx, cmd.synctex_forward.column);
          snprintf(caret_path, sizeof caret_path, "%s", path);
          caret_line = cmd.synctex_forward.line;
-@@ -2614,3 +2632,205 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -2626,3 +2644,205 @@ bool texpresso_main(struct persistent_state *ps)
  
    return reload;
  }

@@ -1,4 +1,4 @@
-From 5a0780665167075bf214af7a58553318ab6f3696 Mon Sep 17 00:00:00 2001
+From d4236e1114fb7ab12f2ee53407724fffc95c6f6f Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -16,11 +16,11 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/engine/engine/xetex-xetexd.h  |   11 +
  src/frontend/editor.c             |  105 +-
  src/frontend/editor.h             |   34 +
- src/frontend/engine_tex.c         |   71 ++
- src/frontend/main.c               |  893 +++++++++++++++
- src/frontend/synctex.c            | 1738 +++++++++++++++++++++++++++++
- src/frontend/synctex.h            |   87 ++
- 14 files changed, 3167 insertions(+), 57 deletions(-)
+ src/frontend/engine_tex.c         |  162 ++-
+ src/frontend/main.c               |  905 ++++++++++++++
+ src/frontend/synctex.c            | 1908 ++++++++++++++++++++++++++++-
+ src/frontend/synctex.h            |   97 ++
+ 14 files changed, 3446 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -856,7 +856,7 @@ index 05fdd1c..0d9c676 100644
  };
  
 diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
-index 5866b1b..5d275b2 100644
+index 5866b1b..4e2c078 100644
 --- a/src/frontend/engine_tex.c
 +++ b/src/frontend/engine_tex.c
 @@ -27,6 +27,7 @@
@@ -867,7 +867,94 @@ index 5866b1b..5d275b2 100644
  #include <fcntl.h>
  #include <sys/wait.h>
  #include <sys/stat.h>
-@@ -452,6 +453,56 @@ static fz_buffer *output_data(fileentry_t *e)
+@@ -134,6 +135,86 @@ TXP_ENGINE_DEF_CLASS;
+ 
+ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q);
+ 
++/* Overleaf Live: a file that this run wrote and now reads (e.g. a block
++   that \VerbatimOut copied from a source file, as the usage environment of
++   latex-templates does): if its lines are a block of lines of a project
++   .tex file, TeX gets the name "olive-alias:OFFSET:N:NAME:SOURCE" for it.
++   SyncTeX keeps that name, so the caret and clicks can go to SOURCE, line
++   OFFSET + its line (see synctex_input_alias). */
++static int olive_line_eq(const unsigned char *a, int la, const unsigned char *b, int lb)
++{
++  while (la > 0 && (a[la - 1] == '\r' || a[la - 1] == ' ')) la--;
++  while (lb > 0 && (b[lb - 1] == '\r' || b[lb - 1] == ' ')) lb--;
++  return la == lb && memcmp(a, b, la) == 0;
++}
++
++static int olive_alias(struct tex_engine *self, fileentry_t *w, const char *name,
++                       char *out, int out_size)
++{
++  fz_buffer *d = w->saved.data;
++  if (!d || d->len == 0 || d->len > 65536)
++    return 0;
++  /* the lines of the written file */
++  enum { MAXL = 2048 };
++  static int ls[MAXL], ll[MAXL];
++  int n = 0;
++  for (size_t i = 0; i < d->len && n < MAXL;)
++  {
++    size_t j = i;
++    while (j < d->len && d->data[j] != '\n') j++;
++    ls[n] = (int)i;
++    ll[n] = (int)(j - i);
++    n++;
++    i = j + 1;
++  }
++  while (n > 0 && ll[n - 1] == 0) n--;
++  if (n == 0 || n == MAXL)
++    return 0;
++  fileentry_t *e;
++  for (int index = 0; (e = filesystem_scan(self->fs, &index));)
++  {
++    if (e == w || e->saved.data)
++      continue;
++    size_t plen = strlen(e->path);
++    if (plen < 5 || strcmp(e->path + plen - 4, ".tex") != 0)
++      continue;
++    fz_buffer *s = e->edit_data ? e->edit_data : e->fs_data;
++    if (!s || s->len == 0)
++      continue;
++    /* find the block: line by line */
++    int line = 0;
++    for (size_t i = 0; i < s->len; line++)
++    {
++      size_t j = i;
++      while (j < s->len && s->data[j] != '\n') j++;
++      if (olive_line_eq(s->data + i, (int)(j - i), d->data + ls[0], ll[0]))
++      {
++        int k = 1;
++        size_t p = j + 1;
++        while (k < n && p <= s->len)
++        {
++          size_t q = p;
++          while (q < s->len && s->data[q] != '\n') q++;
++          if (!olive_line_eq(s->data + p, (int)(q - p), d->data + ls[k], ll[k]))
++            break;
++          k++;
++          p = q + 1;
++        }
++        if (k == n)
++        {
++          snprintf(out, out_size, "olive-alias:%d:%d:%s:%s", line, n, name, e->path);
++          fprintf(stderr, "[info] %s is lines %d-%d of %s\n", name, line + 1, line + n, e->path);
++          return 1;
++        }
++      }
++      i = j + 1;
++    }
++  }
++  return 0;
++}
++
++
++
+ // Launching processes
+ 
+ static pid_t exec_xelatex_generic(char **args, int *fd)
+@@ -452,6 +533,56 @@ static fz_buffer *output_data(fileentry_t *e)
    return e->saved.data;
  }
  
@@ -924,7 +1011,7 @@ index 5866b1b..5d275b2 100644
  static const char *
  lookup_path(struct tex_engine *self, const char *path, char buf[1024], struct stat *st)
  {
-@@ -468,6 +519,26 @@ lookup_path(struct tex_engine *self, const char *path, char buf[1024], struct st
+@@ -468,6 +599,26 @@ lookup_path(struct tex_engine *self, const char *path, char buf[1024], struct st
    }
    while ((fs_path = expand_path(&inclusion_path, path, buf)));
  
@@ -951,11 +1038,31 @@ index 5866b1b..5d275b2 100644
    return fs_path;
  }
  
+@@ -696,11 +847,16 @@ static void answer_query(fz_context *ctx, struct tex_engine *self, query_t *q)
+         }
+       }
+ 
+-      int n = strlen(q->open.path);
++      const char *answer_path = q->open.path;
++      char alias[1400];
++      if (q->tag == Q_OPRD && e->saved.level == FILE_WRITE && e->saved.data &&
++          olive_alias(self, e, q->open.path, alias, sizeof(alias)))
++        answer_path = alias;
++      int n = strlen(answer_path);
+       a.open.path_len = n;
+       a.tag = A_OPEN;
+-      editor_notify_lookup(q->open.path, n, q->tag == Q_OPRD, LOOKUP_SUCCESSFUL);
+-      memmove(channel_get_buffer(self->c, n), q->open.path, n);
++      editor_notify_lookup(q->open.path, strlen(q->open.path), q->tag == Q_OPRD, LOOKUP_SUCCESSFUL);
++      memmove(channel_get_buffer(self->c, n), answer_path, n);
+       channel_write_answer(self->c, p->fd, &a);
+       break;
+     }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..ab69913 100644
+index c202294..be3745d 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,699 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,711 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1495,6 +1602,9 @@ index c202294..ab69913 100644
 +  int ng = 0, ne = 0, done = 0;
 +  synctex_element *els = NULL;
 +  synctex_glyph *glyphs = page_scan(ps->ctx, ui->eng, page, &ng, &els, &ne);
++  fz_buffer *sbuf;
++  synctex_t *stx = send(synctex, ui->eng, &sbuf);
++  synctex_resolve_elements(ps->ctx, stx, sbuf, page, els, ne);
 +  int on_glyph = 0, slack = 65536 / 2;
 +  for (int i = 0; i < ng && !on_glyph; i++)
 +    if (glyphs[i].font && x >= glyphs[i].x0 - slack && x <= glyphs[i].x1 + slack &&
@@ -1539,6 +1649,7 @@ index c202294..ab69913 100644
 +  int ng = 0, ne = 0;
 +  synctex_element *els = NULL;
 +  synctex_glyph *glyphs = page_scan(ps->ctx, ui->eng, page, &ng, &els, &ne);
++  synctex_resolve_elements(ps->ctx, stx, buf, page, els, ne);
 +  synctex_file file;
 +  int has_file = caret_path[0] &&
 +                 caret_file(ps->ctx, ps->doc_path, caret_path, (int)strlen(caret_path), &file);
@@ -1584,6 +1695,9 @@ index c202294..ab69913 100644
 +  synctex_element *els = NULL;
 +  synctex_glyph *glyphs = page_scan(ps->ctx, ui->eng, page, &ng, &els, &ne);
 +  drop_glyphs(ps->ctx, glyphs, ng);
++  fz_buffer *sbuf;
++  synctex_t *stx = send(synctex, ui->eng, &sbuf);
++  synctex_resolve_elements(ps->ctx, stx, sbuf, page, els, ne);
 +  float fs = send(scale_factor, ui->eng);
 +  printf("(synctex-elements %d %d", page, ne);
 +  for (int i = 0; i < ne; i++)
@@ -1638,12 +1752,17 @@ index c202294..ab69913 100644
 +      int tag = pairs[2 * i], k = 0;
 +      while (i < n && pairs[2 * i] == tag)
 +        lines[k++] = pairs[2 * i++ + 1];
-+      const char *name;
-+      int len = synctex_input_name(stx, buf, tag, &name);
++      const char *name, *base;
++      int len = synctex_input_name(stx, buf, tag, &name), blen, off = 0, nl;
++      if (len > 0 && synctex_input_alias(name, len, &base, &blen, &off, &nl))
++      {
++        name = base;
++        len = blen;
++      }
 +      synctex_file file;
 +      if (len <= 0 || !caret_file(ps->ctx, ps->doc_path, name, len, &file))
 +        continue;
-+      synctex_caret_map(ps->ctx, stx, buf, page, glyphs, ng, tag, &file, lines, k, &info);
++      synctex_caret_map(ps->ctx, stx, buf, page, glyphs, ng, tag, &file, lines, k, off, &info);
 +      caret_file_free(ps->ctx, &file);
 +    }
 +    drop_glyphs(ps->ctx, glyphs, ng);
@@ -1655,7 +1774,7 @@ index c202294..ab69913 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1610,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1622,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1781,7 +1900,7 @@ index c202294..ab69913 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +1881,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +1893,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -1801,7 +1920,7 @@ index c202294..ab69913 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +1909,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +1921,35 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -1837,7 +1956,7 @@ index c202294..ab69913 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1983,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1995,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1871,7 +1990,7 @@ index c202294..ab69913 100644
    }
  }
  
-@@ -1234,9 +2110,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +2122,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -1884,7 +2003,7 @@ index c202294..ab69913 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1353,6 +2232,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +2244,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -1899,7 +2018,7 @@ index c202294..ab69913 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +2292,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +2304,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -1911,7 +2030,7 @@ index c202294..ab69913 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2572,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2584,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -1920,7 +2039,7 @@ index c202294..ab69913 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..ca048ba 100644
+index 3f0b8f5..60aef55 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -1931,7 +2050,7 @@ index 3f0b8f5..ca048ba 100644
  #include <string.h>
  #include "synctex.h"
  #include "editor.h"
-@@ -153,6 +154,10 @@ struct synctex_s
+@@ -153,6 +154,14 @@ struct synctex_s
  
    /* Best candidate so far (or candidate_page == -1 if there has been no match). */
    int candidate_page, candidate_line, candidate_x, candidate_y;
@@ -1939,14 +2058,72 @@ index 3f0b8f5..ca048ba 100644
 +  /* Overleaf Live: column of the forward search (-1: not known), and the
 +     tag/line of the last search (kept after the search is done). */
 +  int target_column, last_tag, last_line;
++  /* Overleaf Live: the input of the search is an alias (a block of the
++     target file, see synctex_input_alias): target_line and last_line are
++     lines of the block; the file line is that + the offset */
++  int target_offset, last_offset;
  };
  
  synctex_t *synctex_new(fz_context *ctx)
-@@ -735,6 +740,13 @@ void synctex_set_target(synctex_t *stx, int current_page, const char *path, int
+@@ -676,6 +685,43 @@ static int get_input(fz_buffer *buf,
+   return (fend - filename);
+ }
+ 
++int synctex_input_alias(const char *name, int len, const char **base, int *base_len,
++                        int *offset, int *nlines)
++{
++  static const char pre[] = "olive-alias:";
++  int pl = (int)sizeof(pre) - 1;
++  if (len <= pl || strncmp(name, pre, pl) != 0)
++    return 0;
++  const char *p = name + pl, *end = name + len;
++  int off = 0, n = 0;
++  while (p < end && *p >= '0' && *p <= '9') off = off * 10 + (*p++ - '0');
++  if (p >= end || *p++ != ':') return 0;
++  while (p < end && *p >= '0' && *p <= '9') n = n * 10 + (*p++ - '0');
++  if (p >= end || *p++ != ':') return 0;
++  while (p < end && *p != ':') p++;     /* the name TeX asked for */
++  if (p >= end) return 0;
++  p++;
++  *base = p;
++  *base_len = (int)(end - p);
++  *offset = off;
++  *nlines = n;
++  return 1;
++}
++
++/* editor_synctex, with an alias input mapped back to its source file */
++static void synctex_editor(const char *doc_dir, const char *fname, int len, int line, int col)
++{
++  const char *base;
++  int blen, off, n;
++  if (synctex_input_alias(fname, len, &base, &blen, &off, &n))
++  {
++    fname = base;
++    len = blen;
++    line += off;
++  }
++  editor_synctex(doc_dir, fname, len, line, col);
++}
++
+ void synctex_scan(fz_context *ctx,
+                   synctex_t *stx,
+                   fz_buffer *buf,
+@@ -706,7 +752,7 @@ void synctex_scan(fz_context *ctx,
+             c.rect.x0, c.rect.y0, c.rect.x1, c.rect.y1,
+             len, fname,
+             c.link.line, c.link.column);
+-    editor_synctex(doc_dir, fname, len, c.link.line, c.link.column);
++    synctex_editor(doc_dir, fname, len, c.link.line, c.link.column);
+   }
+ }
+ 
+@@ -735,6 +781,14 @@ void synctex_set_target(synctex_t *stx, int current_page, const char *path, int
  
    stx->input_tag = 0;
    stx->input_found = 0;
 +  stx->target_column = -1;
++  stx->target_offset = 0;
 +}
 +
 +void synctex_set_target_column(synctex_t *stx, int column)
@@ -1956,16 +2133,57 @@ index 3f0b8f5..ca048ba 100644
  }
  
  static bool is_oneliner(enum kind k)
-@@ -904,6 +916,8 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -751,6 +805,39 @@ static bool synctex_find_input(fz_context *ctx, synctex_t *stx, fz_buffer *buf)
+     return 0;
+ 
+   int plen = strlen(stx->target_path);
++
++  /* Overleaf Live: a block of the target file that TeX read again under an
++     alias (the output of a usage example): the last one with the line */
++  if (stx->input_tag == 0)
++  {
++    int best = -1, best_off = 0;
++    for (int i = 0; i < (int)stx->input_off.len; i++)
++    {
++      const char *fname, *base;
++      int len = get_input(buf, stx, i, &fname), blen, off, n;
++      if (synctex_input_alias(fname, len, &base, &blen, &off, &n) &&
++          blen == plen && strncmp(base, stx->target_path, plen) == 0 &&
++          stx->target_line > off && stx->target_line <= off + n)
++      {
++        best = i;
++        best_off = off;
++      }
++    }
++    if (best >= 0)
++    {
++      stx->input_tag = best;
++      stx->target_line -= best_off;
++      stx->target_offset = best_off;
++      int page = 0, pages = synctex_page_count(stx),
++          offset = int_abs(stx->input_off.ptr[best]);
++      while (page < pages && stx->page_off.ptr[page * 2 + 1] < offset)
++        page += 1;
++      stx->scanned_pages = page;
++      stx->input_found = 1;
++      stx->candidate_page = -1;
++      return 1;
++    }
++  }
+   while (stx->input_tag < stx->input_off.len)
+   {
+     const char *fname;
+@@ -904,6 +991,9 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    if (updated_candidate)
    {
 +    stx->last_tag = stx->input_tag + 1;
 +    stx->last_line = stx->target_line;
++    stx->last_offset = stx->target_offset;
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +928,1727 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +1004,1819 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -3120,19 +3338,22 @@ index 3f0b8f5..ca048ba 100644
 +void synctex_caret_map(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
 +                       const synctex_glyph *glyphs, int nglyphs, int tag,
 +                       const synctex_file *file, const int *lines, int nlines,
-+                       synctex_caret_info *info)
++                       int offset, synctex_caret_info *info)
 +{
 +  for (int k = 0; k < nlines && info->npts < info->cappts; k++)
 +  {
-+    int l = lines[k];
++    int l = lines[k];   /* a line of the input; of the file: l + offset */
 +    synctex_source w;
-+    if (!window_of(file, l, &w))
++    if (!window_of(file, l + offset, &w))
 +      continue;
++    w.first_line -= offset;
 +    struct rc r;
 +    int ok = rc_prepare(&r, ctx, stx, buf, page, tag, glyphs, nglyphs, &w);
 +    struct fwd_line fl;
 +    fwd_line_walk(ctx, stx, buf, page, tag, l, &fl);
-+    int len = (l < file->nlines ? file->line_off[l] - 1 : file->len) - file->line_off[l - 1];
++    int fline = l + offset;
++    int len = (fline < file->nlines ? file->line_off[fline] - 1 : file->len) -
++              file->line_off[fline - 1];
 +    for (int cc = 0; cc <= len && info->npts < info->cappts; cc++)
 +    {
 +      int px, py, ph, pd, it;
@@ -3144,7 +3365,7 @@ index 3f0b8f5..ca048ba 100644
 +        rc_refine_point(&r, it, l, cc, &px, &py, &ph, &pd, &b, &hb);
 +      if (!it && !hb)
 +        continue;
-+      info_add(info, l, cc, px, py, ph, pd, hb, &b);
++      info_add(info, l + offset, cc, px, py, ph, pd, hb, &b);
 +    }
 +    free(fl.recs);
 +    rc_free(&r);
@@ -3166,8 +3387,10 @@ index 3f0b8f5..ca048ba 100644
 +  synctex_source w;
 +  struct rc r;
 +  memset(&r, 0, sizeof(r));
-+  int ok = window_of(file, line, &w) &&
-+           rc_prepare(&r, ctx, stx, buf, page, tag, glyphs, nglyphs, &w);
++  int off = stx->last_offset;   /* an alias input: line + off in the file */
++  int ok = window_of(file, line + off, &w);
++  w.first_line -= off;
++  ok = ok && rc_prepare(&r, ctx, stx, buf, page, tag, glyphs, nglyphs, &w);
 +  if (ok && col >= 0)
 +  {
 +    synctex_box b;
@@ -3181,8 +3404,8 @@ index 3f0b8f5..ca048ba 100644
 +    /* the lines around it, each with its own window (as its own caret) */
 +    int lines[5], n = 0;
 +    for (int l = line - 2; l <= line + 2; l++)
-+      if (l >= 1 && l <= file->nlines) lines[n++] = l;
-+    synctex_caret_map(ctx, stx, buf, page, glyphs, nglyphs, tag, file, lines, n, info);
++      if (l + off >= 1 && l + off <= file->nlines) lines[n++] = l;
++    synctex_caret_map(ctx, stx, buf, page, glyphs, nglyphs, tag, file, lines, n, off, info);
 +  }
 +  return 1;
 +}
@@ -3562,6 +3785,93 @@ index 3f0b8f5..ca048ba 100644
 +  return best;
 +}
 +
++struct alias_env { synctex_t *stx; fz_buffer *buf; int *tags; synctex_box *box; int n, max; };
++
++static void alias_fn(void *penv, const struct walk_item *it)
++{
++  struct alias_env *e = penv;
++  int tag = it->r.link.tag;
++  if (tag <= 0 || it->r.kind == STEX_LEAVE_H || it->r.kind == STEX_LEAVE_V)
++    return;
++  int k = 0;
++  while (k < e->n && e->tags[k] != tag) k++;
++  if (k == e->n)
++  {
++    const char *name, *base;
++    int len = get_input(e->buf, e->stx, tag - 1, &name), bl, off, n;
++    if (e->n == e->max || !synctex_input_alias(name, len, &base, &bl, &off, &n))
++      return;
++    e->tags[k] = tag;
++    e->box[k] = (synctex_box){it->r.point.x, it->r.point.y, it->r.point.x, it->r.point.y};
++    e->n++;
++  }
++  synctex_box *b = &e->box[k];
++  int x0 = it->r.point.x, x1 = x0, y0 = it->r.point.y, y1 = y0;
++  if (it->r.kind == STEX_ENTER_H || it->r.kind == STEX_ENTER_V)
++  {
++    x1 = x0 + it->r.size.width;
++    y0 -= it->r.size.height;
++    y1 += it->r.size.depth;
++  }
++  if (x0 < b->x0) b->x0 = x0;
++  if (y0 < b->y0) b->y0 = y0;
++  if (x1 > b->x1) b->x1 = x1;
++  if (y1 > b->y1) b->y1 = y1;
++}
++
++void synctex_resolve_elements(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                              synctex_element *els, int nels)
++{
++  enum { MAXA = 64 };
++  int tags[MAXA];
++  synctex_box box[MAXA];
++  struct alias_env env = {stx, buf, tags, box, 0, MAXA};
++  if (!stx || nels <= 0)
++    return;
++  walk_page(ctx, stx, buf, page, alias_fn, &env);
++  for (int i = 0; i < nels; i++)
++  {
++    synctex_element *e = &els[i];
++    if (!e->has_box)
++      continue;
++    const char *eb = strrchr(e->file, '/');
++    eb = eb ? eb + 1 : e->file;
++    int cx = (e->x0 + e->x1) / 2, cy = (e->y0 + e->y1) / 2;
++    int best = -1;
++    double best_d = 0;
++    for (int k = 0; k < env.n; k++)
++    {
++      const char *name, *base;
++      int len = get_input(buf, stx, tags[k] - 1, &name), bl, off, n;
++      synctex_input_alias(name, len, &base, &bl, &off, &n);
++      /* the name TeX asked for: between the 3rd and the 4th ':' */
++      const char *q = name + 12;   /* after "olive-alias:" */
++      for (int c = 0; c < 2 && q < base; q++) if (*q == ':') c++;
++      int qlen = (int)(base - 1 - q);
++      const char *qb = q;
++      for (const char *t = q; t < q + qlen; t++) if (*t == '/') qb = t + 1;
++      int qblen = (int)(q + qlen - qb);
++      if (qblen != (int)strlen(eb) || strncmp(qb, eb, qblen) != 0)
++        continue;
++      if (e->line < 1 || e->line > n)
++        continue;
++      double dx = cx < box[k].x0 ? box[k].x0 - cx : cx > box[k].x1 ? cx - box[k].x1 : 0;
++      double dy = cy < box[k].y0 ? box[k].y0 - cy : cy > box[k].y1 ? cy - box[k].y1 : 0;
++      double d = dx * dx + dy * dy;
++      if (best < 0 || d < best_d) { best = k; best_d = d; }
++    }
++    if (best < 0)
++      continue;
++    const char *name, *base;
++    int len = get_input(buf, stx, tags[best] - 1, &name), bl, off, n;
++    synctex_input_alias(name, len, &base, &bl, &off, &n);
++    snprintf(e->file, sizeof(e->file), "%.*s", bl, base);
++    e->line += off;
++    if (e->end_line > 0)
++      e->end_line += off;
++  }
++}
++
 +/* ---------------- backward ---------------- */
 +
 +struct box_env {
@@ -3690,11 +4000,11 @@ index 3f0b8f5..ca048ba 100644
 +  int len = get_input(buf, stx, tag - 1, &fname);
 +  fprintf(stderr, "[synctex scan] page %d (%d,%d) -> tag %d line %d column %d\n",
 +          page, x, y, tag, line, col);
-+  editor_synctex(doc_dir, fname, len, line, col);
++  synctex_editor(doc_dir, fname, len, line, col);
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..d634c01 100644
+index cfff199..178a8b3 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -3705,7 +4015,7 @@ index cfff199..d634c01 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,92 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,102 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -3771,7 +4081,17 @@ index cfff199..d634c01 100644
 +void synctex_caret_map(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
 +                       const synctex_glyph *glyphs, int nglyphs, int tag,
 +                       const synctex_file *file, const int *lines, int nlines,
-+                       synctex_caret_info *info);
++                       int offset, synctex_caret_info *info);
++/* An input that TeX read under an alias (see olive_alias in engine_tex.c):
++   "olive-alias:OFFSET:N:NAME:SOURCE" is lines OFFSET+1 .. OFFSET+N of
++   SOURCE. Returns 0 for another name. */
++int synctex_input_alias(const char *name, int len, const char **base, int *base_len,
++                        int *offset, int *nlines);
++/* Elements of page from a file that TeX read under an alias (their file is
++   the name TeX asked for, e.g. main-usage.tex): to the source file and its
++   lines, by the alias whose records on the page are nearest */
++void synctex_resolve_elements(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                              synctex_element *els, int nels);
 +/* The source lines with records on page: pairs (tag, line), sorted; returns
 +   their count (at most max) */
 +int synctex_page_lines(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
