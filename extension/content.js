@@ -542,7 +542,8 @@
   // Tools to check what the live preview does:
   //   - Caret map: the caret of every character of the lines around the
   //     editor cursor (2 before, 2 after), one colour per line, and the boxes
-  //     of the parts that do not map 1:1 to their glyphs;
+  //     of the parts that do not map 1:1 to their glyphs; with "Whole page",
+  //     of every source line on the page of the caret;
   //   - Caret: the last cursor and the answer of the engine (and how long it took);
   //   - Engine log: the messages of the browser engine (TeX Live downloads,
   //     snapshots, errors), to copy into a bug report.
@@ -551,6 +552,7 @@
     const MAX_LOG = 400;
     const logLines = [];
     let panel = null, mapOn = false, mapLayer = null, sentAt = 0, lastMap = null;
+    let wholePage = false, mapPage = -1, pageTimer = null;
 
     function build() {
       panel = document.createElement("div");
@@ -561,8 +563,10 @@
           <button class="olive-debug-close" title="Close (Alt+Shift+G)">×</button></div>
         <section>
           <label><input type="checkbox" class="olive-debug-map"> Caret map</label>
+          <label class="olive-debug-sub"><input type="checkbox" class="olive-debug-page"> Whole page</label>
           <div class="olive-debug-note">Marks where the caret goes for each character of the
-            lines around the cursor. Colours: <span class="olive-debug-legend"></span>.
+            lines around the cursor (with <i>Whole page</i>: of all lines on the page of the caret).
+            Colours: <span class="olive-debug-legend"></span>.
             Orange box: a part that does not map 1:1 to its glyphs.</div>
           <div class="olive-debug-mapinfo"></div>
         </section>
@@ -579,10 +583,11 @@
       const q = (sel) => panel.querySelector(sel);
       q(".olive-debug-version").textContent =
         "v" + chrome.runtime.getManifest().version + " · " + (engine === "wsl" ? "WSL helper" : "browser engine");
-      q(".olive-debug-legend").innerHTML = LINE_COLORS.map((c, k) =>
-        `<span style="color:${c}">${k < 2 ? "line " + (k - 2) : k === 2 ? "cursor line" : "line +" + (k - 2)}</span>`).join(", ");
       q(".olive-debug-close").addEventListener("click", toggle);
       q(".olive-debug-map").addEventListener("change", (e) => setMap(e.target.checked));
+      q(".olive-debug-page").addEventListener("change", (e) => setWholePage(e.target.checked));
+      q(".olive-debug-page").disabled = !mapOn;
+      showLegend();
       q(".olive-debug-copy").addEventListener("click", () => {
         navigator.clipboard.writeText(logLines.join("\n")).catch(() => {});
       });
@@ -602,21 +607,57 @@
       }
     }
 
+    function showLegend() {
+      panel.querySelector(".olive-debug-legend").innerHTML = wholePage
+        ? "they change from line to line (" + LINE_COLORS.map((c) => `<span style="color:${c}">■</span>`).join("") + ")"
+        : LINE_COLORS.map((c, k) =>
+          `<span style="color:${c}">${k < 2 ? "line " + (k - 2) : k === 2 ? "cursor line" : "line +" + (k - 2)}</span>`).join(", ");
+    }
+
+    // the engine sends the map of the lines around the cursor with each
+    // caret (caretDebug on); the whole page only when asked (caretMap)
     function setMap(on) {
       mapOn = on;
-      if (panel) panel.querySelector(".olive-debug-map").checked = on;
-      send({ type: "caretDebug", on });
-      if (!on) clearMap();
+      if (panel) {
+        panel.querySelector(".olive-debug-map").checked = on;
+        panel.querySelector(".olive-debug-page").disabled = !on;
+      }
+      send({ type: "caretDebug", on: on && !wholePage });
+      clearMap();
+      if (!on) return;
+      if (wholePage) requestPage(caret ? caret.page : -1, 0);
       else if (lastCursor) {
         sentAt = performance.now();
         send({ type: "cursor", ...lastCursor });
       }
     }
 
+    function setWholePage(on) {
+      wholePage = on;
+      if (panel) showLegend();
+      if (mapOn) setMap(true);
+    }
+
+    // the map of a page: again when the caret goes to another page, and
+    // after the page was typeset again (an edit)
+    function requestPage(page, delay) {
+      clearTimeout(pageTimer);
+      if (!mapOn || !wholePage || page < 0) return;
+      pageTimer = setTimeout(() => {
+        mapPage = page;
+        send({ type: "caretMap", page });
+      }, delay);
+    }
+
+    function pageUpdated(page) {
+      if (mapOn && wholePage && page === mapPage) requestPage(page, 1000);
+    }
+
     function clearMap() {
       if (mapLayer) mapLayer.remove();
       mapLayer = null;
       lastMap = null;
+      mapPage = -1;
       if (panel) panel.querySelector(".olive-debug-mapinfo").textContent = "";
     }
 
@@ -640,7 +681,7 @@
       const cur = lastCursor ? lastCursor.line : lines[Math.floor(lines.length / 2)] || 0;
       const counts = {};
       for (const [line, col, x, y, ph, pd] of msg.points) {
-        const k = Math.max(-2, Math.min(2, line - cur)) + 2;
+        const k = wholePage ? ((line % 5) + 5) % 5 : Math.max(-2, Math.min(2, line - cur)) + 2;
         const t = document.createElement("div");
         t.className = "olive-debug-tick";
         t.style.left = (x / w * 100) + "%";
@@ -657,14 +698,16 @@
         mapLayer.appendChild(e);
       }
       slot.appendChild(mapLayer);
-      if (panel) panel.querySelector(".olive-debug-mapinfo").textContent =
-        `page ${msg.page + 1}: ` + Object.entries(counts).map(([l, n]) => `line ${l}: ${n} positions`).join(", ") +
-        (msg.boxes.length ? `; ${msg.boxes.length} box${msg.boxes.length > 1 ? "es" : ""}` : "");
+      const boxes = msg.boxes.length ? `; ${msg.boxes.length} box${msg.boxes.length > 1 ? "es" : ""}` : "";
+      if (panel) panel.querySelector(".olive-debug-mapinfo").textContent = wholePage
+        ? `page ${msg.page + 1}: ${msg.points.length} positions on ${lines.length} source lines${boxes}`
+        : `page ${msg.page + 1}: ` + Object.entries(counts).map(([l, n]) => `line ${l}: ${n} positions`).join(", ") + boxes;
     }
 
     function cursor(c) { sentAt = performance.now(); }
 
     function caret(msg) {
+      if (mapOn && wholePage && msg.h + msg.d > 0.5 && msg.page !== mapPage) requestPage(msg.page, 0);
       if (!panel) return;
       const ms = sentAt ? Math.round(performance.now() - sentAt) : null;
       sentAt = 0;
@@ -701,7 +744,8 @@
       }
     }, true);
 
-    return { map, caret, cursor, log, clearMap, redraw: drawMap, get mapOn() { return mapOn; } };
+    return { map, caret, cursor, log, clearMap, pageUpdated, redraw: drawMap,
+      get lineMapOn() { return mapOn && !wholePage; } };
   })();
 
   // --- connection ---------------------------------------------------
@@ -737,7 +781,7 @@
   function startSession() {
     lastText.clear();
     send({ type: "hello", project: projectId, main: settings.main, lua: settings.lua });
-    if (dbg.mapOn) send({ type: "caretDebug", on: true });
+    if (dbg.lineMapOn) send({ type: "caretDebug", on: true });
     view = { first: -1, last: -1 };
     sendWidth();
     checkView();
@@ -768,6 +812,7 @@
           applyZoom();
         }
         updateSlots();
+        dbg.pageUpdated(msg.page);
         const slot = slots()[msg.page];
         if (slot) {
           sizeSlot(slot, size);

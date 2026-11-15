@@ -604,6 +604,10 @@ const handlers = {
     command(`(synctex-scan ${Math.max(0, msg.page | 0)} ${(+msg.x || 0).toFixed(2)} ${(+msg.y || 0).toFixed(2)})`);
   },
   lua(client, msg) { P.lua = !!msg.on; },
+  // the caret map of every source line on one page (debug panel, whole page)
+  caretMap(client, msg) {
+    if (P.run) command(`(caret-map ${Math.max(0, msg.page | 0)})`);
+  },
   caretDebug(client, msg) {
     P.caretDebug = !!msg.on;
     if (P.run) command(`(caret-debug ${P.caretDebug ? 't' : 'nil'})`);

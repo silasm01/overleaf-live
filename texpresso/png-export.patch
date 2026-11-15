@@ -1,4 +1,4 @@
-From cc8591e56ad2426709c07a502cba15cb24ba73c0 Mon Sep 17 00:00:00 2001
+From 989671267331b51c37fa00d4a4905d7072107324 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -14,13 +14,13 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/engine/engine/xetex-synctex.c |   44 +-
  src/engine/engine/xetex-xetex0.c  |   25 +-
  src/engine/engine/xetex-xetexd.h  |   11 +
- src/frontend/editor.c             |   83 +-
- src/frontend/editor.h             |   28 +
+ src/frontend/editor.c             |   94 +-
+ src/frontend/editor.h             |   33 +
  src/frontend/engine_tex.c         |   71 ++
- src/frontend/main.c               |  477 +++++++++++
- src/frontend/synctex.c            | 1245 +++++++++++++++++++++++++++++
- src/frontend/synctex.h            |   41 +
- 14 files changed, 2140 insertions(+), 57 deletions(-)
+ src/frontend/main.c               |  541 +++++++++++
+ src/frontend/synctex.c            | 1403 +++++++++++++++++++++++++++++
+ src/frontend/synctex.h            |   59 ++
+ 14 files changed, 2396 insertions(+), 57 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -591,7 +591,7 @@ index 183c218..ee3637a 100644
  #define GLUE_SPEC_stretch_order(p) mem[p].b16.s1 /* aka "type" of a node */
  #define GLUE_SPEC_shrink_order(p) mem[p].b16.s0 /* aka "subtype" of a node */
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
-index 6face98..b56c58d 100644
+index 6face98..6cce9ca 100644
 --- a/src/frontend/editor.c
 +++ b/src/frontend/editor.c
 @@ -219,6 +219,50 @@ bool editor_parse(fz_context *ctx,
@@ -645,10 +645,21 @@ index 6face98..b56c58d 100644
    else if (strcmp(verb, "rescan") == 0)
    {
      if (len != 1)
-@@ -252,23 +296,60 @@ bool editor_parse(fz_context *ctx,
+@@ -252,23 +296,71 @@ bool editor_parse(fz_context *ctx,
      *out = (struct editor_command){.tag = EDIT_STAY_ON_TOP,
                                     .stay_on_top = {.status = status}};
    }
++  else if (strcmp(verb, "caret-map") == 0)
++  {
++    // (caret-map page): the caret map of every source line on the page
++    if (len != 2)
++      goto arity;
++    val page = val_array_get(ctx, stack, command, 1);
++    if (!val_is_number(page))
++      goto arguments;
++    *out = (struct editor_command){.tag = EDIT_CARET_MAP,
++                                   .caret_map = {.page = val_number(ctx, page)}};
++  }
 +  else if (strcmp(verb, "caret-debug") == 0)
 +  {
 +    // (caret-debug t|nil): report the caret of every character near it
@@ -708,18 +719,19 @@ index 6face98..b56c58d 100644
    {
      if (len != 1)
 diff --git a/src/frontend/editor.h b/src/frontend/editor.h
-index 05fdd1c..6cba9fb 100644
+index 05fdd1c..0250a03 100644
 --- a/src/frontend/editor.h
 +++ b/src/frontend/editor.h
-@@ -28,6 +28,7 @@ enum EDITOR_COMMAND
+@@ -28,6 +28,8 @@ enum EDITOR_COMMAND
    EDIT_RESCAN,
    EDIT_STAY_ON_TOP,
    EDIT_SYNCTEX_FORWARD,
 +  EDIT_CARET_DEBUG,
++  EDIT_CARET_MAP,
    EDIT_MAP_WINDOW,
    EDIT_UNMAP_WINDOW,
    EDIT_CROP,
-@@ -37,6 +38,10 @@ enum EDITOR_COMMAND
+@@ -37,6 +39,10 @@ enum EDITOR_COMMAND
    EDIT_RESUME,
    EDIT_RERUN,
    EDIT_RERUN_ONCE,
@@ -730,7 +742,7 @@ index 05fdd1c..6cba9fb 100644
  };
  
  struct editor_change
-@@ -105,8 +110,18 @@ struct editor_command
+@@ -105,8 +111,22 @@ struct editor_command
      struct {
        const char *path;
        int line;
@@ -743,13 +755,17 @@ index 05fdd1c..6cba9fb 100644
 +
 +    struct {
 +      int page;
++    } caret_map;
++
++    struct {
++      int page;
 +      float x, y; /* point, from the top left of the page */
 +    } synctex_scan;
 +
      struct {
        float x, y, w, h;
      } map_window;
-@@ -136,6 +151,19 @@ struct editor_command
+@@ -136,6 +156,19 @@ struct editor_command
  
      struct {
      } rerun_once;
@@ -866,10 +882,10 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..5824a6a 100644
+index c202294..275571e 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,297 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,357 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1052,122 +1068,182 @@ index c202294..5824a6a 100644
 +  return result;
 +}
 +
-+/* lines caret_line-2 .. caret_line+2 of the file of the last forward
-+   search (the window for synctex_refine_target); text NULL if not found.
-+   Free src->text with fz_free. */
-+static void caret_source(fz_context *ctx, const char *doc_path, synctex_source *src)
++/* a source file as Unicode characters (SyncTeX and the editor count
++   characters, not bytes), with its line starts. Free with caret_file_free. */
++static int caret_file(fz_context *ctx, const char *doc_path, const char *path, int path_len,
++                      synctex_file *f)
 +{
-+  memset(src, 0, sizeof(*src));
-+  if (!caret_path[0] || caret_line <= 0)
-+    return;
++  memset(f, 0, sizeof(*f));
 +  char full[2048];
-+  if (caret_path[0] == '/' || !doc_path)
-+    snprintf(full, sizeof full, "%s", caret_path);
++  if (path[0] == '/' || !doc_path)
++    snprintf(full, sizeof full, "%.*s", path_len, path);
 +  else
-+    snprintf(full, sizeof full, "%s/%s", doc_path, caret_path);
-+  FILE *f = fopen(full, "rb");
-+  if (!f)
-+    return;
-+  fseek(f, 0, SEEK_END);
-+  long size = ftell(f);
-+  fseek(f, 0, SEEK_SET);
-+  if (size < 0) { fclose(f); return; }
++    snprintf(full, sizeof full, "%s/%.*s", doc_path, path_len, path);
++  FILE *fp = fopen(full, "rb");
++  if (!fp)
++    return 0;
++  fseek(fp, 0, SEEK_END);
++  long size = ftell(fp);
++  fseek(fp, 0, SEEK_SET);
++  if (size < 0) { fclose(fp); return 0; }
 +  char *in = fz_malloc(ctx, size + 1);
-+  size = (long)fread(in, 1, size, f);
-+  fclose(f);
++  size = (long)fread(in, 1, size, fp);
++  fclose(fp);
 +  int *out = fz_malloc(ctx, sizeof(int) * (size + 1));
-+  int first = caret_line > 2 ? caret_line - 2 : 1, last = caret_line + 2;
++  int nl = 1;
++  for (long i = 0; i < size; i++) if (in[i] == '\n') nl++;
++  int *off = fz_malloc(ctx, sizeof(int) * nl);
 +  long i = 0, n = 0;
-+  int line = 1, nl = 0;
-+  while (line < first && i < size)
-+    if (in[i++] == '\n') line++;
-+  for (; line <= last && nl < 8; line++)
++  int line = 0;
++  off[line++] = 0;
++  while (i < size)
 +  {
-+    src->offsets[nl++] = (int)n;
-+    while (i < size && in[i] != '\n')
++    unsigned char b = (unsigned char)in[i];
++    if (b == '\n')
 +    {
-+      /* one entry per character (UTF-8 decoded), as SyncTeX counts */
-+      unsigned char b = (unsigned char)in[i];
-+      int cp = b, more = 0;
-+      if (b >= 0xF0) { cp = b & 0x07; more = 3; }
-+      else if (b >= 0xE0) { cp = b & 0x0F; more = 2; }
-+      else if (b >= 0xC0) { cp = b & 0x1F; more = 1; }
++      out[n++] = '\n';
 +      i++;
-+      while (more-- > 0 && i < size && ((unsigned char)in[i] & 0xC0) == 0x80)
-+        cp = (cp << 6) | (in[i++] & 0x3F);
-+      if (cp != '\r') out[n++] = cp;
++      off[line++] = (int)n;
++      continue;
 +    }
-+    if (i >= size || line == last) break;
-+    i++;             /* the line break */
-+    out[n++] = '\n';
++    int cp = b, more = 0;
++    if (b >= 0xF0) { cp = b & 0x07; more = 3; }
++    else if (b >= 0xE0) { cp = b & 0x0F; more = 2; }
++    else if (b >= 0xC0) { cp = b & 0x1F; more = 1; }
++    i++;
++    while (more-- > 0 && i < size && ((unsigned char)in[i] & 0xC0) == 0x80)
++      cp = (cp << 6) | (in[i++] & 0x3F);
++    if (cp != '\r') out[n++] = cp;
 +  }
 +  fz_free(ctx, in);
 +  out[n] = 0;
-+  if (line < caret_line || nl <= caret_line - first)
-+  { fz_free(ctx, out); memset(src, 0, sizeof(*src)); return; }
-+  src->text = out;
-+  src->len = (int)n;
-+  src->first_line = first;
-+  src->nlines = nl;
++  f->text = out;
++  f->len = (int)n;
++  f->line_off = off;
++  f->nlines = line;
++  return 1;
++}
++
++static void caret_file_free(fz_context *ctx, synctex_file *f)
++{
++  fz_free(ctx, (int *)f->text);
++  fz_free(ctx, (int *)f->line_off);
++  memset(f, 0, sizeof(*f));
++}
++
++static void drop_glyphs(fz_context *ctx, synctex_glyph *glyphs, int ng)
++{
++  for (int i = 0; i < ng; i++)
++    if (glyphs[i].font)
++      fz_drop_font(ctx, glyphs[i].font);
++  fz_free(ctx, glyphs);
++}
++
++enum { CAP_PTS = 16384, CAP_BOXES = 2048 };
++static synctex_debug_point caret_pts[CAP_PTS];
++static synctex_box caret_boxes[CAP_BOXES];
++static const float caret_pad = 1.0f;   /* points around a box */
++
++/* (synctex-debug page n line col x y height depth box ... m x0 y0 x1 y1 ...) */
++static void print_caret_map(int page, float fs, const synctex_caret_info *info)
++{
++  printf("(synctex-debug %d %d", page, info->npts);
++  for (int i = 0; i < info->npts; i++)
++  {
++    const synctex_debug_point *p = &info->pts[i];
++    printf(" %d %d %.2f %.2f %.2f %.2f %d", p->line, p->col, fs * p->x, fs * p->y,
++           fs * p->h, fs * p->d, p->box);
++  }
++  printf(" %d", info->nboxes);
++  for (int i = 0; i < info->nboxes; i++)
++  {
++    const synctex_box *b = &info->boxes[i];
++    printf(" %.2f %.2f %.2f %.2f", fs * b->x0 - caret_pad, fs * b->y0 - caret_pad,
++           fs * b->x1 + caret_pad, fs * b->y1 + caret_pad);
++  }
++  printf(")\n");
 +}
 +
 +/* the caret of the last forward search (x, y: the point of SyncTeX), on
 +   stdout, in points:
 +     (synctex-target page x y height depth [box-x0 box-y0 box-x1 box-y1])
-+   and with caret-debug, the caret of every character of the window:
-+     (synctex-debug page n line col x y height depth box ... m x0 y0 x1 y1 ...) */
++   and with caret-debug, the caret map of the lines around it */
 +static void caret_report(struct persistent_state *ps, ui_state *ui, synctex_t *stx,
 +                         fz_buffer *buf, int page, int x, int y)
 +{
 +  int ng = 0;
 +  synctex_glyph *glyphs = page_glyphs(ps->ctx, ui->eng, page, &ng);
-+  synctex_source src;
-+  caret_source(ps->ctx, ps->doc_path, &src);
-+  enum { CAP_PTS = 1024, CAP_BOXES = 256 };
-+  static synctex_debug_point pts[CAP_PTS];
-+  static synctex_box boxes[CAP_BOXES];
++  synctex_file file;
++  int has_file = caret_path[0] &&
++                 caret_file(ps->ctx, ps->doc_path, caret_path, (int)strlen(caret_path), &file);
 +  synctex_caret_info info = {0};
 +  info.debug = caret_debug;
-+  info.pts = pts;
-+  info.cappts = CAP_PTS;
-+  info.boxes = boxes;
-+  info.capboxes = CAP_BOXES;
++  info.pts = caret_pts;
++  info.cappts = 2048;
++  info.boxes = caret_boxes;
++  info.capboxes = 512;
 +  int rx = x, ry = y, rh = 0, rd = 0;
-+  synctex_refine_target(ps->ctx, stx, buf, page, glyphs, ng, &src, &rx, &ry, &rh, &rd, &info);
-+  for (int i = 0; i < ng; i++)
-+    if (glyphs[i].font)
-+      fz_drop_font(ps->ctx, glyphs[i].font);
-+  fz_free(ps->ctx, glyphs);
-+  fz_free(ps->ctx, (int *)src.text);
++  synctex_refine_target(ps->ctx, stx, buf, page, glyphs, ng, has_file ? &file : NULL,
++                        &rx, &ry, &rh, &rd, &info);
++  drop_glyphs(ps->ctx, glyphs, ng);
++  if (has_file)
++    caret_file_free(ps->ctx, &file);
 +  float fs = send(scale_factor, ui->eng);
-+  const float pad = 1.0f;   /* points around the box */
 +  if (info.has_box)
 +    printf("(synctex-target %d %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f)\n",
 +           page, fs * rx, fs * ry, fs * rh, fs * rd,
-+           fs * info.box.x0 - pad, fs * info.box.y0 - pad,
-+           fs * info.box.x1 + pad, fs * info.box.y1 + pad);
++           fs * info.box.x0 - caret_pad, fs * info.box.y0 - caret_pad,
++           fs * info.box.x1 + caret_pad, fs * info.box.y1 + caret_pad);
 +  else
 +    printf("(synctex-target %d %.2f %.2f %.2f %.2f)\n",
 +           page, fs * rx, fs * ry, fs * rh, fs * rd);
 +  if (caret_debug)
++    print_caret_map(page, fs, &info);
++  fflush(stdout);
++}
++
++/* (caret-map page): the caret map of every source line on the page, from
++   all its files; answer (synctex-debug ...) */
++static void caret_page_map(struct persistent_state *ps, ui_state *ui, int page)
++{
++  fz_buffer *buf;
++  synctex_t *stx = send(synctex, ui->eng, &buf);
++  synctex_caret_info info = {0};
++  info.pts = caret_pts;
++  info.cappts = CAP_PTS;
++  info.boxes = caret_boxes;
++  info.capboxes = CAP_BOXES;
++  if (stx && page >= 0 && page < synctex_page_count(stx))
 +  {
-+    printf("(synctex-debug %d %d", page, info.npts);
-+    for (int i = 0; i < info.npts; i++)
-+      printf(" %d %d %.2f %.2f %.2f %.2f %d", pts[i].line, pts[i].col, fs * pts[i].x,
-+             fs * pts[i].y, fs * pts[i].h, fs * pts[i].d, pts[i].box);
-+    printf(" %d", info.nboxes);
-+    for (int i = 0; i < info.nboxes; i++)
-+      printf(" %.2f %.2f %.2f %.2f", fs * boxes[i].x0 - pad, fs * boxes[i].y0 - pad,
-+             fs * boxes[i].x1 + pad, fs * boxes[i].y1 + pad);
-+    printf(")\n");
++    enum { MAXLINES = 4096 };
++    static int pairs[2 * MAXLINES];
++    static int lines[MAXLINES];
++    int n = synctex_page_lines(ps->ctx, stx, buf, page, pairs, MAXLINES);
++    int ng = 0;
++    synctex_glyph *glyphs = page_glyphs(ps->ctx, ui->eng, page, &ng);
++    for (int i = 0; i < n;)
++    {
++      int tag = pairs[2 * i], k = 0;
++      while (i < n && pairs[2 * i] == tag)
++        lines[k++] = pairs[2 * i++ + 1];
++      const char *name;
++      int len = synctex_input_name(stx, buf, tag, &name);
++      synctex_file file;
++      if (len <= 0 || !caret_file(ps->ctx, ps->doc_path, name, len, &file))
++        continue;
++      synctex_caret_map(ps->ctx, stx, buf, page, glyphs, ng, tag, &file, lines, k, &info);
++      caret_file_free(ps->ctx, &file);
++    }
++    drop_glyphs(ps->ctx, glyphs, ng);
 +  }
++  print_caret_map(page, send(scale_factor, ui->eng), &info);
 +  fflush(stdout);
 +}
 +
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1208,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1268,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1293,10 +1369,14 @@ index c202294..5824a6a 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +1479,11 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +1539,15 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
++    case EDIT_CARET_MAP:
++      caret_page_map(ps, ui, cmd.caret_map.page);
++      break;
++
 +    case EDIT_CARET_DEBUG:
 +      caret_debug = cmd.caret_debug.status;
 +      fprintf(stderr, "[command] caret-debug %d\n", caret_debug);
@@ -1305,7 +1385,7 @@ index c202294..5824a6a 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +1499,32 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +1563,32 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -1338,7 +1418,7 @@ index c202294..5824a6a 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1570,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1634,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1372,7 +1452,7 @@ index c202294..5824a6a 100644
    }
  }
  
-@@ -1353,6 +1816,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +1880,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -1387,7 +1467,7 @@ index c202294..5824a6a 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +1876,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +1940,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -1399,7 +1479,7 @@ index c202294..5824a6a 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2156,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2220,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -1408,7 +1488,7 @@ index c202294..5824a6a 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..6a804b7 100644
+index 3f0b8f5..9c780ec 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -1453,7 +1533,7 @@ index 3f0b8f5..6a804b7 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +928,1234 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +928,1392 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -2417,12 +2497,77 @@ index 3f0b8f5..6a804b7 100644
 +/* The point of SyncTeX for line, col: interpolated between the records of
 +   the line. *in_text = 0: nothing of the line is in a line of text (e.g.
 +   \begin{env}), the point is where the next text starts. */
++static int fwd_point(const struct fwd_env *pe, int *x, int *y, int *h, int *d, int *in_text);
++
 +static int fwd_interp(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
 +                      int tag, int line, int col, int *x, int *y, int *h, int *d,
 +                      int *in_text)
 +{
 +  struct fwd_env e = {.tag = tag, .line = line, .c = col};
 +  walk_page(ctx, stx, buf, page, fwd_fn, &e);
++  return fwd_point(&e, x, y, h, d, in_text);
++}
++
++/* The records of one line of a page, walked once: then the point of any
++   column (fwd_from), as fwd_interp, without walking the page again. */
++struct fwd_line {
++  struct fwd_env base;      /* walked with no column: f, rprev, next, nprev */
++  struct walk_item *recs;   /* the records of the line with a column, in order */
++  int n, cap;
++};
++
++static void fwd_line_fn(void *penv, const struct walk_item *it)
++{
++  struct fwd_line *fl = penv;
++  fwd_fn(&fl->base, it);
++  if (it->r.kind == STEX_ENTER_H || it->r.kind == STEX_ENTER_V)
++    return;
++  if (it->r.link.tag != fl->base.tag || it->r.link.line != fl->base.line ||
++      it->r.link.column < 0)
++    return;
++  if (fl->n == fl->cap)
++  {
++    int cap = fl->cap ? fl->cap * 2 : 64;
++    struct walk_item *r = realloc(fl->recs, sizeof(*r) * cap);
++    if (!r) return;
++    fl->recs = r;
++    fl->cap = cap;
++  }
++  fl->recs[fl->n++] = *it;
++}
++
++static void fwd_line_walk(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                          int tag, int line, struct fwd_line *fl)
++{
++  memset(fl, 0, sizeof(*fl));
++  fl->base.tag = tag;
++  fl->base.line = line;
++  fl->base.c = -1;
++  walk_page(ctx, stx, buf, page, fwd_line_fn, fl);
++}
++
++static int fwd_from(const struct fwd_line *fl, int col, int *x, int *y, int *h, int *d,
++                    int *in_text)
++{
++  struct fwd_env e = fl->base;
++  e.c = col;
++  for (int i = 0; i < fl->n; i++)
++  {
++    const struct walk_item *it = &fl->recs[i];
++    int a = it->r.link.column - 1;
++    if (a <= col)
++    {
++      if (!e.has_l || a >= e.l.r.link.column) { e.l = *it; e.has_l = 1; }
++    }
++    else if (!e.has_r || a < e.r.r.link.column) { e.r = *it; e.has_r = 1; }
++  }
++  return fwd_point(&e, x, y, h, d, in_text);
++}
++
++static int fwd_point(const struct fwd_env *pe, int *x, int *y, int *h, int *d, int *in_text)
++{
++  const struct fwd_env *ep = pe;
++  #define e (*ep)
 +  *in_text = 1;
 +  if ((!e.has_f || !e.f.box) && !e.has_l && !e.has_r)
 +  {
@@ -2482,6 +2627,7 @@ index 3f0b8f5..6a804b7 100644
 +  *h = base->bh;
 +  *d = base->bd;
 +  return 1;
++  #undef e
 +}
 +
 +/* rc_locate; for a line with no text of its own (in_text 0, e.g.
@@ -2498,9 +2644,81 @@ index 3f0b8f5..6a804b7 100644
 +  *x = tx; *y = ty; *h = th; *d = td;
 +}
 +
++/* the source window of line: lines line-2 .. line+2 of the file */
++static int window_of(const synctex_file *f, int line, synctex_source *w)
++{
++  memset(w, 0, sizeof(*w));
++  if (!f || !f->text || line < 1 || line > f->nlines)
++    return 0;
++  int first = line > 2 ? line - 2 : 1, last = line + 2;
++  if (last > f->nlines) last = f->nlines;
++  int start = f->line_off[first - 1];
++  int end = last < f->nlines ? f->line_off[last] - 1 : f->len;
++  w->text = f->text + start;
++  w->len = end - start;
++  w->first_line = first;
++  w->nlines = last - first + 1;
++  for (int k = 0; k < w->nlines; k++)
++    w->offsets[k] = f->line_off[first - 1 + k] - start;
++  return 1;
++}
++
++static void info_add(synctex_caret_info *info, int line, int col, int x, int y, int h, int d,
++                     int hb, const synctex_box *b)
++{
++  if (info->npts >= info->cappts)
++    return;
++  int bi = -1;
++  if (hb)
++  {
++    if (info->nboxes > 0 && !memcmp(&info->boxes[info->nboxes - 1], b, sizeof(*b)))
++      bi = info->nboxes - 1;
++    else if (info->nboxes < info->capboxes)
++    {
++      info->boxes[info->nboxes] = *b;
++      bi = info->nboxes++;
++    }
++  }
++  info->pts[info->npts++] = (synctex_debug_point){line, col, x, y, h, d, bi};
++}
++
++void synctex_caret_map(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                       const synctex_glyph *glyphs, int nglyphs, int tag,
++                       const synctex_file *file, const int *lines, int nlines,
++                       synctex_caret_info *info)
++{
++  for (int k = 0; k < nlines && info->npts < info->cappts; k++)
++  {
++    int l = lines[k];
++    synctex_source w;
++    if (!window_of(file, l, &w))
++      continue;
++    struct rc r;
++    int ok = rc_prepare(&r, ctx, stx, buf, page, tag, glyphs, nglyphs, &w);
++    struct fwd_line fl;
++    fwd_line_walk(ctx, stx, buf, page, tag, l, &fl);
++    int len = (l < file->nlines ? file->line_off[l] - 1 : file->len) - file->line_off[l - 1];
++    for (int cc = 0; cc <= len && info->npts < info->cappts; cc++)
++    {
++      int px, py, ph, pd, it;
++      if (!fwd_from(&fl, cc, &px, &py, &ph, &pd, &it))
++        continue;
++      synctex_box b;
++      int hb = 0;
++      if (ok)
++        rc_refine_point(&r, it, l, cc, &px, &py, &ph, &pd, &b, &hb);
++      if (!it && !hb)
++        continue;
++      info_add(info, l, cc, px, py, ph, pd, hb, &b);
++    }
++    free(fl.recs);
++    rc_free(&r);
++  }
++}
++
 +int synctex_refine_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
 +                          int page, const synctex_glyph *glyphs, int nglyphs,
-+                          const synctex_source *source,
++                          const synctex_file *file,
 +                          int *x, int *y, int *h, int *d, synctex_caret_info *info)
 +{
 +  if (info) { info->has_box = 0; info->npts = 0; info->nboxes = 0; }
@@ -2510,9 +2728,11 @@ index 3f0b8f5..6a804b7 100644
 +  int in_text;
 +  if (!fwd_interp(ctx, stx, buf, page, tag, line, col, x, y, h, d, &in_text))
 +    return 0;
++  synctex_source w;
 +  struct rc r;
 +  memset(&r, 0, sizeof(r));
-+  int ok = rc_prepare(&r, ctx, stx, buf, page, tag, glyphs, nglyphs, source);
++  int ok = window_of(file, line, &w) &&
++           rc_prepare(&r, ctx, stx, buf, page, tag, glyphs, nglyphs, &w);
 +  if (ok && col >= 0)
 +  {
 +    synctex_box b;
@@ -2520,41 +2740,59 @@ index 3f0b8f5..6a804b7 100644
 +    rc_refine_point(&r, in_text, line, col, x, y, h, d, &b, &hb);
 +    if (info && hb) { info->has_box = 1; info->box = b; }
 +  }
-+  if (ok && info && info->debug && info->pts && info->boxes)
-+  {
-+    /* every character of the window */
-+    for (int li = 0; li < source->nlines; li++)
-+    {
-+      int l = source->first_line + li;
-+      int len = ((li + 1 < source->nlines) ? source->offsets[li + 1] - 1 : source->len) -
-+                source->offsets[li];
-+      for (int cc = 0; cc <= len && info->npts < info->cappts; cc++)
-+      {
-+        int px, py, ph, pd, it;
-+        if (!fwd_interp(ctx, stx, buf, page, tag, l, cc, &px, &py, &ph, &pd, &it))
-+          continue;
-+        synctex_box b;
-+        int hb = 0;
-+        rc_refine_point(&r, it, l, cc, &px, &py, &ph, &pd, &b, &hb);
-+        if (!it && !hb)
-+          continue;
-+        int bi = -1;
-+        if (hb)
-+        {
-+          if (info->nboxes > 0 && !memcmp(&info->boxes[info->nboxes - 1], &b, sizeof(b)))
-+            bi = info->nboxes - 1;
-+          else if (info->nboxes < info->capboxes)
-+          {
-+            info->boxes[info->nboxes] = b;
-+            bi = info->nboxes++;
-+          }
-+        }
-+        info->pts[info->npts++] = (synctex_debug_point){l, cc, px, py, ph, pd, bi};
-+      }
-+    }
-+  }
 +  rc_free(&r);
++  if (info && info->debug && info->pts && info->boxes && file)
++  {
++    /* the lines around it, each with its own window (as its own caret) */
++    int lines[5], n = 0;
++    for (int l = line - 2; l <= line + 2; l++)
++      if (l >= 1 && l <= file->nlines) lines[n++] = l;
++    synctex_caret_map(ctx, stx, buf, page, glyphs, nglyphs, tag, file, lines, n, info);
++  }
 +  return 1;
++}
++
++static int cmp_int2(const void *a, const void *b)
++{
++  const int *x = a, *y = b;
++  if (x[0] != y[0]) return (x[0] > y[0]) - (x[0] < y[0]);
++  return (x[1] > y[1]) - (x[1] < y[1]);
++}
++
++struct lines_env { int *pairs; int n, max; };
++
++static void lines_fn(void *penv, const struct walk_item *it)
++{
++  struct lines_env *e = penv;
++  if (it->r.link.tag <= 0 || it->r.link.line <= 0 || e->n >= e->max)
++    return;
++  e->pairs[2 * e->n] = it->r.link.tag;
++  e->pairs[2 * e->n + 1] = it->r.link.line;
++  e->n++;
++}
++
++int synctex_page_lines(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                       int *pairs, int max)
++{
++  struct lines_env e = {pairs, 0, max};
++  walk_page(ctx, stx, buf, page, lines_fn, &e);
++  qsort(pairs, e.n, sizeof(int) * 2, cmp_int2);
++  int n = 0;
++  for (int i = 0; i < e.n; i++)
++    if (n == 0 || pairs[2 * i] != pairs[2 * (n - 1)] || pairs[2 * i + 1] != pairs[2 * (n - 1) + 1])
++    {
++      pairs[2 * n] = pairs[2 * i];
++      pairs[2 * n + 1] = pairs[2 * i + 1];
++      n++;
++    }
++  return n;
++}
++
++int synctex_input_name(synctex_t *stx, fz_buffer *buf, int tag, const char **name)
++{
++  if (!stx || tag < 1 || tag > (int)stx->input_off.len)
++    return 0;
++  return get_input(buf, stx, tag - 1, name);
 +}
 +
 +/* ---------------- backward ---------------- */
@@ -2689,7 +2927,7 @@ index 3f0b8f5..6a804b7 100644
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..abbfc1b 100644
+index cfff199..7b334ba 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -2700,7 +2938,7 @@ index cfff199..abbfc1b 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,46 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,64 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -2737,10 +2975,28 @@ index cfff199..abbfc1b 100644
 +  synctex_box *boxes;
 +  int nboxes, capboxes;
 +} synctex_caret_info;
++/* A source file as Unicode characters, lines joined with '\n'; line i
++   (from 1) starts at line_off[i - 1] */
++typedef struct { const int *text; int len; const int *line_off; int nlines; } synctex_file;
++/* The caret of the last forward search; file: the source file of the
++   target (NULL: interpolated only). With info->debug, also the caret map of
++   the lines around it. */
 +int synctex_refine_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
 +                          int page, const synctex_glyph *glyphs, int nglyphs,
-+                          const synctex_source *source,
++                          const synctex_file *file,
 +                          int *x, int *y, int *h, int *d, synctex_caret_info *info);
++/* The caret of every character of lines (of input tag, in file) on page,
++   added to info->pts and info->boxes */
++void synctex_caret_map(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                       const synctex_glyph *glyphs, int nglyphs, int tag,
++                       const synctex_file *file, const int *lines, int nlines,
++                       synctex_caret_info *info);
++/* The source lines with records on page: pairs (tag, line), sorted; returns
++   their count (at most max) */
++int synctex_page_lines(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
++                       int *pairs, int max);
++/* The file name of input tag (not 0-terminated); returns its length, 0 if none */
++int synctex_input_name(synctex_t *stx, fz_buffer *buf, int tag, const char **name);
 +/* Reverse search with column. Returns 1 and calls editor_synctex. */
 +int synctex_scan_column(fz_context *ctx, synctex_t *stx, fz_buffer *buf,
 +                        const char *doc_dir, unsigned page, int x, int y);

@@ -30,6 +30,7 @@ Messages (JSON, one per WebSocket message)
                                              (line from 1, column from 0)
     {"type": "scan", "page": n, "x": pt, "y": pt}   double-click on a page
     {"type": "caretDebug", "on": bool}       debug panel: the caret map
+    {"type": "caretMap", "page": n}          debug panel: the caret map of a page
   helper -> extension
     {"type": "versions", "extension": "0.1.1"}   the version install.sh put
                                              in the Windows folder
@@ -441,6 +442,9 @@ class Project:
         x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
         await self.command(f"(synctex-scan {page} {x:.2f} {y:.2f})")
 
+    async def on_caret_map(self, ws, msg):
+        await self.command(f"(caret-map {max(0, int(msg.get('page', 0)))})")
+
     async def on_caret_debug(self, ws, msg):
         self.caret_debug = bool(msg.get("on"))
         await self.command(f"(caret-debug {'t' if self.caret_debug else 'nil'})")
@@ -499,7 +503,8 @@ async def handler(ws, path=None):
                     "project": project.on_project, "edit": project.on_edit,
                     "view": project.on_view, "width": project.on_width,
                     "lua": project.on_lua, "cursor": project.on_cursor,
-                    "scan": project.on_scan, "caretDebug": project.on_caret_debug}.get(kind)
+                    "scan": project.on_scan, "caretDebug": project.on_caret_debug,
+                    "caretMap": project.on_caret_map}.get(kind)
                 if handler_fn:
                     await handler_fn(ws, msg)
             except Exception as e:          # one bad message must not end the connection

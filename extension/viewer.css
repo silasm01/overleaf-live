@@ -127,3 +127,5 @@
 .olive-debug-layer { position: absolute; inset: 0; pointer-events: none; }
 .olive-debug-tick { position: absolute; width: 1px; opacity: .85; }
 .olive-debug-box { position: absolute; box-sizing: border-box; border: 1px dashed #f08c00; }
+.olive-debug label.olive-debug-sub { font-weight: 400 !important; margin: 3px 0 0 20px !important; }
+.olive-debug label:has(input:disabled) { color: #999 !important; cursor: default; }
