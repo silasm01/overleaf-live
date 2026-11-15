@@ -470,7 +470,8 @@ const countRe = /^\(page-count (\d+) (\d)\)$/;
 const appendRe = /^\(append out (\d+) "(.*)"\)$/;
 // (synctex-target page x y h d [box x0 y0 x1 y1]): the box of a part that
 // does not map 1:1 to its glyphs (\infty, \ref{...}, a picture)
-const caretRe = /^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?\)$/;
+// "element": the box is a picture or a TikZ element (the viewer shows only the box)
+const caretRe = /^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?( element)?\)$/;
 const backRe = /^\(synctex "(.*)" (-?\d+) (-?\d+)\)$/;
 const truncRe = /^\(truncate out (\d+)\)$/;
 const unescape = s => s.replace(/\\(.)/g, (_, c) => c === 'n' ? '\n' : c);
@@ -486,6 +487,7 @@ function onLine(run, line) {
   } else if ((m = line.match(caretRe))) {
     const caret = { type: 'caret', page: +m[1], x: +m[2], y: +m[3], h: +m[4], d: +m[5] };
     if (m[6]) caret.box = m[6].trim().split(' ').map(Number);
+    if (m[7]) caret.element = true;
     send(caret);
   } else if (line.startsWith('(synctex-debug ')) {
     send(parseCaretDebug(line));

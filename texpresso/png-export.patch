@@ -1,4 +1,4 @@
-From 1661d2e0619e5ac38c4f0ce0b77b5c835d63b428 Mon Sep 17 00:00:00 2001
+From 9c823c2f18595d5c0269c10521cba52a9f5106bb Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -17,10 +17,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  105 +-
  src/frontend/editor.h             |   34 +
  src/frontend/engine_tex.c         |   71 ++
- src/frontend/main.c               |  885 +++++++++++++++
- src/frontend/synctex.c            | 1735 +++++++++++++++++++++++++++++
- src/frontend/synctex.h            |   85 ++
- 14 files changed, 3154 insertions(+), 57 deletions(-)
+ src/frontend/main.c               |  887 +++++++++++++++
+ src/frontend/synctex.c            | 1736 +++++++++++++++++++++++++++++
+ src/frontend/synctex.h            |   87 ++
+ 14 files changed, 3159 insertions(+), 57 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -952,10 +952,10 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..3738421 100644
+index c202294..2372ae7 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,691 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,693 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1524,7 +1524,8 @@ index c202294..3738421 100644
 +
 +/* the caret of the last forward search (x, y: the point of SyncTeX), on
 +   stdout, in points:
-+     (synctex-target page x y height depth [box-x0 box-y0 box-x1 box-y1])
++     (synctex-target page x y height depth [box-x0 box-y0 box-x1 box-y1 [element]])
++   element: the box is a picture or a TikZ element (the viewer shows no caret)
 +   and with caret-debug, the caret map of the lines around it */
 +static void caret_report(struct persistent_state *ps, ui_state *ui, synctex_t *stx,
 +                         fz_buffer *buf, int page, int x, int y)
@@ -1554,10 +1555,11 @@ index c202294..3738421 100644
 +    caret_file_free(ps->ctx, &file);
 +  float fs = send(scale_factor, ui->eng);
 +  if (info.has_box)
-+    printf("(synctex-target %d %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f)\n",
++    printf("(synctex-target %d %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f%s)\n",
 +           page, fs * rx, fs * ry, fs * rh, fs * rd,
 +           fs * info.box.x0 - caret_pad, fs * info.box.y0 - caret_pad,
-+           fs * info.box.x1 + caret_pad, fs * info.box.y1 + caret_pad);
++           fs * info.box.x1 + caret_pad, fs * info.box.y1 + caret_pad,
++           info.element ? " element" : "");
 +  else
 +    printf("(synctex-target %d %.2f %.2f %.2f %.2f)\n",
 +           page, fs * rx, fs * ry, fs * rh, fs * rd);
@@ -1647,7 +1649,7 @@ index c202294..3738421 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1602,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1604,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1773,7 +1775,7 @@ index c202294..3738421 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +1873,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +1875,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -1793,7 +1795,7 @@ index c202294..3738421 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +1901,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +1903,35 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -1829,7 +1831,7 @@ index c202294..3738421 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1975,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1977,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1863,7 +1865,7 @@ index c202294..3738421 100644
    }
  }
  
-@@ -1234,9 +2102,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +2104,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -1876,7 +1878,7 @@ index c202294..3738421 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1353,6 +2224,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +2226,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -1891,7 +1893,7 @@ index c202294..3738421 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +2284,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +2286,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -1903,7 +1905,7 @@ index c202294..3738421 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2564,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2566,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -1912,7 +1914,7 @@ index c202294..3738421 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..711c37b 100644
+index 3f0b8f5..d3bc96a 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -1957,7 +1959,7 @@ index 3f0b8f5..711c37b 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +928,1724 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +928,1725 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -2896,6 +2898,7 @@ index 3f0b8f5..711c37b 100644
 +    *y = box->y1;
 +    *h = box->y1 - box->y0;
 +    *d = 0;
++    *has_box = 2;
 +  }
 +  return 1;
 +}
@@ -3145,7 +3148,7 @@ index 3f0b8f5..711c37b 100644
 +                          const synctex_file *file,
 +                          int *x, int *y, int *h, int *d, synctex_caret_info *info)
 +{
-+  if (info) { info->has_box = 0; info->npts = 0; info->nboxes = 0; }
++  if (info) { info->has_box = 0; info->element = 0; info->npts = 0; info->nboxes = 0; }
 +  if (!stx || stx->last_tag <= 0)
 +    return 0;
 +  int tag = stx->last_tag, line = stx->last_line, col = stx->target_column;
@@ -3162,7 +3165,7 @@ index 3f0b8f5..711c37b 100644
 +    synctex_box b;
 +    int hb = 0;
 +    rc_refine_point(&r, in_text, line, col, x, y, h, d, &b, &hb);
-+    if (info && hb) { info->has_box = 1; info->box = b; }
++    if (info && hb) { info->has_box = 1; info->box = b; info->element = hb == 2; }
 +  }
 +  rc_free(&r);
 +  if (info && info->debug && info->pts && info->boxes && file)
@@ -3528,7 +3531,7 @@ index 3f0b8f5..711c37b 100644
 +  *y = box.y1;
 +  *h = box.y1 - box.y0;
 +  *d = 0;
-+  if (info) { info->has_box = 1; info->box = box; }
++  if (info) { info->has_box = 1; info->box = box; info->element = 1; }
 +  return 1;
 +}
 +
@@ -3683,7 +3686,7 @@ index 3f0b8f5..711c37b 100644
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..41547cb 100644
+index cfff199..d634c01 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -3694,7 +3697,7 @@ index cfff199..41547cb 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,90 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,92 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -3725,6 +3728,8 @@ index cfff199..41547cb 100644
 +typedef struct {
 +  int has_box;                 /* out: box of the caret */
 +  synctex_box box;
++  int element;                 /* out: the box is a picture or a TikZ element:
++                                  the viewer shows only the box, no caret */
 +  int debug;                   /* in: fill pts and boxes */
 +  synctex_debug_point *pts;    /* in: arrays of the caller; out: counts */
 +  int npts, cappts;

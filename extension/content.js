@@ -231,6 +231,8 @@
     caretEl.style.left = (caret.x / w * 100) + "%";
     caretEl.style.top = ((caret.y - caret.h) / h * 100) + "%";
     caretEl.style.height = (Math.max(caret.h + caret.d, 4) / h * 100) + "%";
+    // a picture or a TikZ element: only its box, no caret line
+    caretEl.classList.toggle("olive-caret-hidden", !!caret.element);
     if (caretEl.parentElement !== slot) slot.appendChild(caretEl);
     if (caret.box) {
       placeBox(caretBox, slot, caret.box);

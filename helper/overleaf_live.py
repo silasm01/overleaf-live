@@ -41,10 +41,12 @@ Messages (JSON, one per WebSocket message)
     {"type": "count", "count": n, "done": bool}   pages so far; done: all
     {"type": "errors", "lines": ["...", ...]}
     {"type": "caret", "page": n, "x": pt, "y": pt, "h": pt, "d": pt,
-     "box": [x0, y0, x1, y1]}                the cursor in the PDF (y is the
+     "box": [x0, y0, x1, y1], "element": true}   the cursor in the PDF (y is the
                                              baseline; h, d: line height; box:
                                              only for a part that does not map
-                                             1:1 to its glyphs, e.g. a math symbol)
+                                             1:1 to its glyphs, e.g. a math symbol;
+                                             element: a picture or a TikZ element,
+                                             shown as the box only)
     {"type": "caretElements", "page": n, "elements": [{"kind", "line", "end", "index",
      "depth", "box", "file", "src": [l0, c0, l1, c1]}, ...]}   debug panel
     {"type": "caretDebug", "page": n, "points": [[line, col, x, y, h, d, box], ...],
@@ -236,7 +238,7 @@ class Project:
         page_re = re.compile(r'^\(page-image (\d+) (\d+) (\d) "(.*)"(?: ([\d.]+) ([\d.]+))?\)$')
         count_re = re.compile(r'^\(page-count (\d+) (\d)\)$')
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
-        caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?\)$')
+        caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?( element)?\)$')
         back_re = re.compile(r'^\(synctex "(.*)" (-?\d+) (-?\d+)\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
@@ -262,6 +264,8 @@ class Project:
                          "y": float(m[3]), "h": float(m[4]), "d": float(m[5])}
                 if m[6]:
                     caret["box"] = [float(v) for v in m[6].split()]
+                if m[7]:
+                    caret["element"] = True
                 await self.send(caret)
                 continue
             if line.startswith("(synctex-debug "):

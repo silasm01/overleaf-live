@@ -741,10 +741,10 @@ index 5d275b2..7a5f44f 100644
                                    const char *engine_path,
                                    bool use_texlive,
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index 3738421..c117c7c 100644
+index 2372ae7..093c5a8 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -1210,6 +1210,19 @@ static void caret_page_map(struct persistent_state *ps, ui_state *ui, int page)
+@@ -1212,6 +1212,19 @@ static void caret_page_map(struct persistent_state *ps, ui_state *ui, int page)
  
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
@@ -764,7 +764,7 @@ index 3738421..c117c7c 100644
    const char *rel_path = path, *dir_path = dir;
  
    // Skip common parts
-@@ -1900,7 +1913,12 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1902,7 +1915,12 @@ static void interpret_command(struct persistent_state *ps,
        }
        else
        {
@@ -777,7 +777,7 @@ index 3738421..c117c7c 100644
          synctex_set_target_column(stx, cmd.synctex_forward.column);
          snprintf(caret_path, sizeof caret_path, "%s", path);
          caret_line = cmd.synctex_forward.line;
-@@ -2606,3 +2624,205 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -2608,3 +2626,205 @@ bool texpresso_main(struct persistent_state *ps)
  
    return reload;
  }
