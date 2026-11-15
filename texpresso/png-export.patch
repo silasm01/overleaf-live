@@ -1,4 +1,4 @@
-From 9c823c2f18595d5c0269c10521cba52a9f5106bb Mon Sep 17 00:00:00 2001
+From 5a0780665167075bf214af7a58553318ab6f3696 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -17,10 +17,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  105 +-
  src/frontend/editor.h             |   34 +
  src/frontend/engine_tex.c         |   71 ++
- src/frontend/main.c               |  887 +++++++++++++++
- src/frontend/synctex.c            | 1736 +++++++++++++++++++++++++++++
+ src/frontend/main.c               |  893 +++++++++++++++
+ src/frontend/synctex.c            | 1738 +++++++++++++++++++++++++++++
  src/frontend/synctex.h            |   87 ++
- 14 files changed, 3159 insertions(+), 57 deletions(-)
+ 14 files changed, 3167 insertions(+), 57 deletions(-)
 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
@@ -952,10 +952,10 @@ index 5866b1b..5d275b2 100644
  }
  
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..2372ae7 100644
+index c202294..ab69913 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,693 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,699 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1245,6 +1245,12 @@ index c202294..2372ae7 100644
 +  glyph_device *dev = (glyph_device *)dev_;
 +  (void)cs; (void)color; (void)alpha; (void)cp; (void)st;
 +  fz_rect r = fz_bound_path(ctx, path, NULL, ctm);   /* the stroke bound is too wide (miters) */
++  if (dev->picture > 0)
++  {
++    /* a picture's box: its paths only (its bottom is on the baseline) */
++    glyph_picture(ctx, dev, r);
++    return;
++  }
 +  if (st && fz_is_valid_rect(r))
 +  {
 +    /* half the line width around the path itself (a straight line has an
@@ -1649,7 +1655,7 @@ index c202294..2372ae7 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +1604,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +1610,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -1775,7 +1781,7 @@ index c202294..2372ae7 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +1875,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +1881,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -1795,7 +1801,7 @@ index c202294..2372ae7 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +1903,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +1909,35 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -1831,7 +1837,7 @@ index c202294..2372ae7 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +1977,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +1983,33 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -1865,7 +1871,7 @@ index c202294..2372ae7 100644
    }
  }
  
-@@ -1234,9 +2104,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +2110,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -1878,7 +1884,7 @@ index c202294..2372ae7 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1353,6 +2226,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1353,6 +2232,14 @@ bool texpresso_main(struct persistent_state *ps)
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -1893,7 +1899,7 @@ index c202294..2372ae7 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +2286,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +2292,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -1905,7 +1911,7 @@ index c202294..2372ae7 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +2566,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +2572,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -1914,7 +1920,7 @@ index c202294..2372ae7 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..d3bc96a 100644
+index 3f0b8f5..ca048ba 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -1959,7 +1965,7 @@ index 3f0b8f5..d3bc96a 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +928,1725 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +928,1727 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -2827,6 +2833,8 @@ index 3f0b8f5..d3bc96a 100644
 +    struct grp G[64];
 +    int nt = rc_tokens(r, a, z, t, 64);
 +    int l0 = seg_of_point(r->lines, r->nlines, sp->ox, sp->oy, r->slack);
++    if (r->dbg)
++      fprintf(stderr, "   no glyphs near: %d parts, point %d %d, line %d\n", nt, sp->ox, sp->oy, l0);
 +    if (nt <= 0 || l0 < 0) return 0;
 +    int h = sp->q0;
 +    while (h < sp->q1 && (g[h].line != l0 || g[h].x1 <= sp->ox + r->slack / 2)) h++;
