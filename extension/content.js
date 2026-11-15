@@ -538,7 +538,7 @@
   attach();
   new ResizeObserver(() => { applyZoom(); checkView(); }).observe(scroller);
 
-  // --- the debug panel (Alt+Shift+D) -------------------------------------
+  // --- the debug panel (Alt+Shift+G) -------------------------------------
   // Tools to check what the live preview does:
   //   - Caret map: the caret of every character of the lines around the
   //     editor cursor (2 before, 2 after), one colour per line, and the boxes
@@ -558,7 +558,7 @@
       panel.innerHTML = `
         <div class="olive-debug-head"><b>Overleaf Live · debug</b>
           <span class="olive-debug-version"></span>
-          <button class="olive-debug-close" title="Close (Alt+Shift+D)">×</button></div>
+          <button class="olive-debug-close" title="Close (Alt+Shift+G)">×</button></div>
         <section>
           <label><input type="checkbox" class="olive-debug-map"> Caret map</label>
           <div class="olive-debug-note">Marks where the caret goes for each character of the
@@ -694,7 +694,7 @@
     }
 
     window.addEventListener("keydown", (e) => {
-      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyD") {
+      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyG") {
         e.preventDefault();
         e.stopPropagation();
         toggle();

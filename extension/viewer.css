@@ -93,7 +93,7 @@
 }
 .pdf-dark-mode .olive-caret-box { border-color: #ff922b; background: rgba(255, 146, 43, .10); }
 
-/* --- the debug panel (Alt+Shift+D) --- */
+/* --- the debug panel (Alt+Shift+G) --- */
 .olive-debug {
   position: fixed; top: 64px; right: 16px; z-index: 10000; width: 420px; max-width: 90vw;
   max-height: calc(100vh - 96px); overflow: auto; box-sizing: border-box;

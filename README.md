@@ -95,7 +95,7 @@ It gets the newest version from GitHub, rebuilds TeXpresso only when its patch c
    - Commands that print nothing (for example `\textbf`, `\label{...}`, `\hspace{...}`) do not move the caret: it stays between the visible characters.
    - A line that typesets no text (for example `\begin{figure}`) has no position: the caret becomes pale.
    - A double-click can open only a file that is visible in the file tree: open its folder first.
-   - **Debug panel**: press **Alt+Shift+D** in the Overleaf tab. It has these tools:
+   - **Debug panel**: press **Alt+Shift+G** in the Overleaf tab. It has these tools:
      - **Caret map**: marks the caret position of each character of the 5 lines around the editor cursor (2 lines before, the cursor line, 2 lines after), one colour for each line, and the boxes (dashed orange). Use it to see quickly where the caret is wrong, without selecting text.
      - **Caret**: the editor cursor (file, line, column), the caret that the engine sent (page, position in points, box) and the time to the answer.
      - **Engine log**: the messages of the browser engine (TeX Live downloads, restarts, errors). **Copy** puts them on the clipboard for a bug report. The WSL helper writes its log in its own terminal.
