@@ -130,6 +130,7 @@
   }
   function endWork() {
     clearTimeout(workTimer);
+    if (!working) editAt = 0;
     if (!working) return;
     working = false;
     showProgress();
@@ -211,7 +212,47 @@
       const old = slot.querySelector("img");
       if (old) slot.replaceChild(img, old);
       else slot.prepend(img);
+      // latency: from the key press to the new picture on the screen
+      if (editAt) { latency("key → picture", performance.now() - editAt); editAt = 0; }
+      // the new picture shows the change: the instant values go
+      for (const el of slot.querySelectorAll(".olive-instant")) el.remove();
     });
+  }
+
+  // Instant feedback (a test option of the debug panel, off by default):
+  // a double-click outlines what it edits at once (from the hover cache),
+  // and a value chosen in a menu shows on the page at once, until the new
+  // picture comes (at most 4 s)
+  const instantOn = () => { try { return dbg.instant; } catch (e) { return false; } };
+  function instantValue(slot, box, text) {
+    if (!instantOn() || !slot || box[2] - box[0] > 60 || box[3] - box[1] > 25) return;
+    for (const el of slot.querySelectorAll(".olive-instant")) if (el.dataset.box === box.join()) el.remove();
+    const el = document.createElement("div");
+    el.className = "olive-instant";
+    el.dataset.box = box.join();
+    el.textContent = text;
+    el.style.fontStyle = /^[A-Za-z]+$/.test(text) ? "italic" : "normal";   // (math: letters italic)
+    placeBox(el, slot, box);
+    const zoom = slot.getBoundingClientRect().width / (+slot.dataset.w || pageSize.w);
+    el.style.fontSize = Math.max(6, (box[3] - box[1]) * 0.7 * zoom) + "px";
+    slot.appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+  function instantOutline(pt) {
+    if (!instantOn() || !pt) return;
+    const ed = editableAt(pt);
+    if (!ed) return;
+    const el = document.createElement("div");
+    el.className = "olive-hover-box olive-instant-outline";
+    placeBox(el, pt.slot, ed.box);
+    pt.slot.appendChild(el);
+    setTimeout(() => el.remove(), 1500);
+  }
+
+  // latencies for the debug panel (what the user waits for)
+  let editAt = 0, scanAt = 0, cursorAt = 0, cursorCached = false;
+  function latency(what, ms, extra) {
+    try { dbg.timing({ kind: "latency", what, ms: Math.round(ms), extra }); } catch (e) { /* not set up yet */ }
   }
 
   // a change of sizes keeps the page in view where it is
@@ -336,10 +377,9 @@
       caretBox.remove();
     }
     caretEl.classList.remove("olive-caret-stale");
-    // start the blink again, as an editor caret does after a move
-    caretEl.style.animation = "none";
-    void caretEl.offsetWidth;
-    caretEl.style.animation = "";
+    // start the blink again, as an editor caret does after a move (without
+    // a forced layout of the page: the animation itself restarts)
+    if (caretEl.getAnimations) for (const a of caretEl.getAnimations()) a.currentTime = 0;
     if (follow) followCaret();
   }
 
@@ -373,6 +413,8 @@
     closeField();
     pendingField = null;
     scanPage = index;
+    scanAt = performance.now();
+    instantOutline(pointOf(e));
     askClick({ type: "scan", page: index, x, y });
   });
 
@@ -476,6 +518,7 @@
       if (r.first !== view.first || r.last !== view.last) {
         view = r;
         send({ type: "view", first: r.first, last: r.last });
+        scheduleCache(150);
         try { dbg.view(); } catch (e) { /* not set up yet */ }
       }
       writeToolbar();
@@ -758,7 +801,7 @@
     } else {
       hoverBox.remove();
     }
-    if (!link && !ed) {
+    if (!link && !ed && cacheState.get(pt.page) !== "ok") {
       clearTimeout(probeTimer);
       const near = lastProbe && lastProbe.page === pt.page &&
                    Math.abs(lastProbe.x - pt.x) < 2 && Math.abs(lastProbe.y - pt.y) < 2;
@@ -770,7 +813,7 @@
     if (!connected || selecting) return;
     if (probeBusy) { probeNext = pt; return; }
     probeBusy = true;
-    lastProbe = { page: pt.page, x: pt.x, y: pt.y };
+    lastProbe = { page: pt.page, x: pt.x, y: pt.y, at: performance.now() };
     send({ type: "probe", page: pt.page, x: pt.x, y: pt.y });
     // no answer (an old engine): free again
     setTimeout(() => { probeBusy = false; }, 1500);
@@ -778,6 +821,8 @@
 
   function onProbe(msg) {
     probeBusy = false;
+    // latency: from the probe (80 ms after the mouse stopped) to the answer
+    if (lastProbe && lastProbe.at) { latency("hover → cursor (engine)", performance.now() - lastProbe.at + 80); lastProbe.at = 0; }
     const b = msg.box;
     if ((msg.kind === "field" || msg.kind === "choice") && b[2] > b[0] && b[3] > b[1]) {
       const list = editable.get(msg.page) || [];
@@ -788,10 +833,68 @@
     else if (hoverPt && hoverPt.page === msg.page) hover(hoverPt);
   }
 
-  // a page changed: its map and its editable boxes are old
+  // a page changed: its map, its editable boxes and its carets are old
   function pageChanged(page) {
     editable.delete(page);
+    dropCache(page);
     if (lastProbe && lastProbe.page === page) lastProbe = null;
+    scheduleCache(400);
+  }
+
+  // The cache of the pages in view (and of the caret's page): what a
+  // double-click edits (so the hover cursor needs no engine answer) and the
+  // caret of each character (so the caret moves at once with the editor
+  // cursor; the engine's answer then corrects it). The engine makes it when
+  // the pages in view are done. An edit makes it old.
+  const caretCache = new Map();     // page -> Map(path -> Map(line -> Map(col -> [x, y, h, d])))
+  const cacheState = new Map();     // page -> "asked" | "ok"
+  let cacheTimer = 0;
+  function scheduleCache(delay) {
+    clearTimeout(cacheTimer);
+    cacheTimer = setTimeout(askCache, delay);
+  }
+  function askCache() {
+    if (!connected || !settings.on) return;
+    const want = new Set();
+    for (let p = Math.max(0, view.first); p <= view.last && p < pageCount; p++) want.add(p);
+    if (caret && caret.page < pageCount) want.add(caret.page);
+    for (const p of want) {
+      if (cacheState.has(p)) continue;
+      cacheState.set(p, "asked");
+      send({ type: "pageCache", page: p });
+    }
+  }
+  function dropCache(page) {
+    cacheState.delete(page);
+    caretCache.delete(page);
+  }
+  function dropAllCaches() {
+    for (const p of [...cacheState.keys()]) { dropCache(p); editable.delete(p); }
+  }
+  function onPageCache(msg) {
+    if (cacheState.get(msg.page) !== "asked") return;   // old: the page changed meanwhile
+    cacheState.set(msg.page, "ok");
+    editable.set(msg.page, msg.fields.map((f) => ({ box: f.box, kind: f.kind === "s" ? "choice" : "field" })));
+    const files = new Map();
+    for (const f of msg.files) {
+      const lines = files.get(f.path) || new Map();
+      for (const [l, c, x, y, h, d] of f.pts) {
+        if (!lines.has(l)) lines.set(l, new Map());
+        lines.get(l).set(c, [x, y, h, d]);
+      }
+      files.set(f.path, lines);
+    }
+    caretCache.set(msg.page, files);
+    if (hoverPt && hoverPt.page === msg.page) hover(hoverPt);
+  }
+  // the caret of a cursor position from the cache (only an exact column),
+  // or null
+  function cachedCaret(path, line, col) {
+    for (const [page, files] of caretCache) {
+      const lines = files.get(path), cols = lines && lines.get(line), p = cols && cols.get(col);
+      if (p) return { page, x: p[0], y: p[1], h: p[2], d: p[3] };
+    }
+    return null;
   }
 
   pages.addEventListener("mousemove", (e) => {
@@ -1136,6 +1239,8 @@
     if (detached || scanPage < 0) return;   // the editor is in the other tab
     const slot = slots()[scanPage];
     if (!slot) return;
+    if (scanAt) { latency("double-click → edit box", performance.now() - scanAt); scanAt = 0; }
+    for (const el of slot.querySelectorAll(".olive-instant-outline")) el.remove();
     const box = document.createElement("div");
     box.className = "olive-field";
     const input = document.createElement("input");
@@ -1162,6 +1267,7 @@
         b.addEventListener("click", (e) => {
           e.stopPropagation();
           input.value = f.text.slice(0, s0) + opt + f.text.slice(s1);
+          instantValue(slot, f.box, opt);
           save();
         });
         list.appendChild(b);
@@ -1299,6 +1405,8 @@
     if (detached || scanPage < 0) return;
     const slot = slots()[scanPage];
     if (!slot) return;
+    if (scanAt) { latency("double-click → edit box", performance.now() - scanAt); scanAt = 0; }
+    for (const el of slot.querySelectorAll(".olive-instant-outline")) el.remove();
     const box = document.createElement("div");
     box.className = "olive-field olive-choice";
     const list = document.createElement("div");
@@ -1312,6 +1420,7 @@
         e.stopPropagation();
         closeField();
         if (!o.edits.length) return;
+        instantValue(slot, c.box, o.label);
         const edits = o.edits.map(ed => ({ line: ed.from[0], column: ed.from[1], toLine: ed.to[0],
                                            toColumn: ed.to[1], expect: ed.old, text: ed.text }));
         whenOpen(c.path, edits[0].line, edits[0].column, (id) =>
@@ -1361,7 +1470,7 @@
     const fields = new Map(), fieldsAsked = new Map();
     // what the debug shows, kept per project (also when the panel is closed)
     const debugKey = "debug:" + projectId;
-    const dstate = { map: false, wholePage: false, elements: false, colorBy: "level",
+    const dstate = { map: false, wholePage: false, elements: false, colorBy: "level", instant: false,
                      show: { top: true, mid: true, leaf: true, normal: true, special: true } };
     function saveDebug() {
       dstate.map = mapOn; dstate.wholePage = wholePage; dstate.elements = elementsOn;
@@ -1403,6 +1512,12 @@
           <div class="olive-debug-elinfo"></div>
         </section>
         <section>
+          <label><input type="checkbox" class="olive-debug-instant"> Instant feedback (test)</label>
+          <div class="olive-debug-note">A double-click outlines what it edits at once, and a value
+            chosen in a menu shows on the page at once, before the new picture comes. It can show a
+            value that the new picture does not have (for example after an error).</div>
+        </section>
+        <section>
           <div class="olive-debug-title">Timings</div>
           <pre class="olive-debug-timings">(no timings yet)</pre>
         </section>
@@ -1439,6 +1554,8 @@
         });
         types.appendChild(l);
       }
+      q(".olive-debug-instant").checked = !!dstate.instant;
+      q(".olive-debug-instant").addEventListener("change", (e) => { dstate.instant = e.target.checked; saveDebug(); });
       q(".olive-debug-colorby").value = dstate.colorBy;
       q(".olive-debug-colorby").addEventListener("change", (e) => {
         dstate.colorBy = e.target.value;
@@ -1526,9 +1643,17 @@
     }
 
     // --- timings (debug panel) ---
-    const T = { edits: [], pages: new Map() };
+    const T = { edits: [], pages: new Map(), lat: new Map() };
     function timing(m) {
-      if (m.kind === "edit") { T.edits.push(m.ms); if (T.edits.length > 20) T.edits.shift(); T.edit = m; }
+      if (m.kind === "latency") {
+        const l = T.lat.get(m.what) || { ms: [], extra: new Map() };
+        l.ms.push(m.ms);
+        if (l.ms.length > 30) l.ms.shift();
+        if (m.extra) l.extra.set(m.extra, (l.extra.get(m.extra) || 0) + 1);
+        l.last = m.ms;
+        T.lat.set(m.what, l);
+      }
+      else if (m.kind === "edit") { T.edits.push(m.ms); if (T.edits.length > 20) T.edits.shift(); T.edit = m; }
       else if (m.kind === "page") T.pages.set(m.page, m);
       else T[m.kind] = m;
       if (panel && !panel.hidden) showTimings();
@@ -1556,6 +1681,12 @@
         (T.deep.passes !== undefined ? ` (${T.deep.passes} extra pass${T.deep.passes === 1 ? "" : "es"})` : ""));
       if (T.lua) lines.push(`Lua (WSL)     ${T.lua.ms} ms for latexmk`);
       if (T.fields) lines.push(`editable      ${T.fields.ms} ms for page ${T.fields.page + 1} (${T.fields.n} boxes)`);
+      if (T.lat.size) lines.push("latency (last / median of the last 30):");
+      for (const [what, l] of T.lat) {
+        const sorted = [...l.ms].sort((a, b) => a - b), med = sorted[sorted.length >> 1];
+        const extra = [...l.extra].map(([k, n]) => `${k} ${n}`).join(", ");
+        lines.push(`  ${what}: ${what === "cache vs engine caret" ? "" : `${l.last} / ${med} ms`}${extra ? ` (${extra})` : ""}`);
+      }
       panel.querySelector(".olive-debug-timings").textContent = lines.length ? lines.join("\n") : "(no timings yet)";
     }
 
@@ -1848,7 +1979,8 @@
     load();
     return { map, elements, pageFields, timing, resume, caret, cursor, log, clearMap, clearElements, pageUpdated,
       redraw, view: viewChanged,
-      get lineMapOn() { return mapOn && !wholePage; } };
+      get lineMapOn() { return mapOn && !wholePage; },
+      get instant() { return !!dstate.instant; } };
   })();
 
   // --- connection ---------------------------------------------------
@@ -1927,7 +2059,8 @@
         }
         const slot = slots()[msg.page];
         if (slot) {
-          keepScroll(() => sizeSlot(slot, size));
+          // (a new size only: keepScroll reads the layout)
+          if (+slot.dataset.w !== size.w || +slot.dataset.h !== size.h) keepScroll(() => sizeSlot(slot, size));
           showImage(slot, "data:image/png;base64," + msg.png);
           slot.classList.add("olive-loaded");
         }
@@ -1953,8 +2086,15 @@
           caretBox.remove();
           break;
         }
+        // the cached caret and the engine's: the same? (debug panel)
+        if (caret && caret.cached && caret.page === msg.page)
+          latency("cache vs engine caret", 0, Math.hypot(caret.x - msg.x, caret.y - msg.y) < 1 ? "same" : "different");
         caret = msg;
         placeCaret(Date.now() - lastCursorMove < 3000);
+        if (cursorAt) {
+          latency("cursor → caret", performance.now() - cursorAt, cursorCached ? "cache, then engine" : "engine");
+          cursorAt = 0;
+        }
         break;
       case "caretDebug":
         dbg.map(msg);
@@ -1979,6 +2119,9 @@
         break;
       case "probe":
         onProbe(msg);
+        break;
+      case "pageCache":
+        onPageCache(msg);
         break;
       case "dest":
         onDest(msg);
@@ -2134,6 +2277,17 @@
       lastCursor = { path, line: msg.line, column: msg.column };
       dbg.cursor(lastCursor);
       send({ type: "cursor", path, line: msg.line, column: msg.column });
+      // the caret at once from the cache (the engine's answer corrects it)
+      const cached = cachedCaret(path, msg.line, msg.column);
+      cursorCached = !!cached;
+      if (cached) {
+        caret = Object.assign(cached, { cached: true });
+        placeCaret(true);
+        latency("cursor → caret (cache)", performance.now() - (msg.t || performance.now()));
+        cursorAt = 0;
+      } else {
+        cursorAt = msg.t || performance.now();
+      }
       // no answer: the cursor is in text that is not on a page (yet)
       clearTimeout(caretTimer);
       caretTimer = setTimeout(() => caretEl.classList.add("olive-caret-stale"), 1500);
@@ -2148,6 +2302,9 @@
     if (lastText.get(path) === msg.text) return;
     lastText.set(path, msg.text);
     send({ type: "edit", path, text: msg.text });
+    if (!editAt && document.querySelector(".olive-slot img")) editAt = msg.t || performance.now();
+    dropAllCaches();
+    scheduleCache(800);
     startWork();
   });
 

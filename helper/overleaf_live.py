@@ -288,6 +288,9 @@ class Project:
                 await self.send({"type": "timing", "kind": "page", "page": int(t[2]), "list": float(t[3]),
                                  "draw": float(t[4]), "png": float(t[5]), "map": float(t[6])})
                 continue
+            if line.startswith("(page-cache "):
+                await self.send(self.parse_page_cache(line))
+                continue
             if line.startswith("(page-fields "):
                 t = line[1:-1].split(" ")
                 fields = [{"kind": t[i], "box": [float(v) for v in t[i + 1:i + 5]]}
@@ -591,6 +594,40 @@ class Project:
     async def on_page_maps(self, ws, msg):
         await self.command(f"(page-map {max(0, int(msg.get('first', 0)))} {max(0, int(msg.get('last', 0)))})")
 
+    def parse_page_cache(self, line):
+        """(page-cache page n kind x0 y0 x1 y1 ... nfiles "file" npts line col x y h d ...):
+        the editable boxes of a page (hover) and the caret of each character
+        of its lines, per project file (the caret at once)"""
+        toks = [m[1] if m[1] is not None else m[2]
+                for m in re.finditer(r'"((?:[^"\\]|\\.)*)"|([^\s()]+)', line)]
+        toks = [re.sub(r'\\(.)', r'\1', t) for t in toks]
+        i = 1
+        page, n = int(toks[i]), int(toks[i + 1])
+        i += 2
+        fields = []
+        for _ in range(n):
+            fields.append({"kind": toks[i], "box": [float(v) for v in toks[i + 1:i + 5]]})
+            i += 5
+        files = []
+        nf = int(toks[i]) if i < len(toks) else 0
+        i += 1
+        root = str(self.dir.resolve())
+        for _ in range(nf):
+            path, np_ = toks[i], int(toks[i + 1])
+            i += 2
+            pts = [[float(v) for v in toks[i + 6 * j:i + 6 * j + 6]] for j in range(np_)]
+            i += 6 * np_
+            p = Path(path) if os.path.isabs(path) else (self.dir / path)
+            try:
+                rel = str(p.resolve().relative_to(root))
+            except ValueError:
+                continue
+            files.append({"path": rel, "pts": pts})
+        return {"type": "pageCache", "page": page, "fields": fields, "files": files}
+
+    async def on_page_cache(self, ws, msg):
+        await self.command(f"(page-cache {max(0, int(msg.get('page', 0)))})")
+
     async def on_page_fields(self, ws, msg):
         await self.command(f"(page-fields {max(0, int(msg.get('page', 0)))})")
 
@@ -709,6 +746,7 @@ async def handler(ws, path=None):
                     "caretElements": project.on_caret_elements,
                     "probe": project.on_probe, "pageMaps": project.on_page_maps,
                     "click": project.on_click, "pageFields": project.on_page_fields,
+                    "pageCache": project.on_page_cache,
                     "findDest": project.on_find_dest}.get(kind)
                 if handler_fn:
                     await handler_fn(ws, msg)

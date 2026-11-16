@@ -164,6 +164,7 @@ const P = {
   luaNoted: false,
   feedback: new Map(),       // rel path -> bytes: outputs given back (second pass)
   overleafBbl: null,         // the .bbl of Overleaf's last compile (for biblatex)
+  cacheQueue: [],            // pages for page-cache (when the pages in view are done)
   lastActivity: 0,           // performance.now() of the last edit or view change
 };
 
@@ -290,6 +291,14 @@ function stop() {
   P.run = null;              // the modules (and the engine memory) are garbage now
 }
 
+// one page-cache request (then the engine runs again): 1 if one was sent
+function flushCache() {
+  const page = P.cacheQueue.shift();
+  if (page === undefined || !P.run) return 0;
+  command(`(page-cache ${page})`);
+  return 1;
+}
+
 function command(text) {
   const run = P.run;
   if (!run) return;
@@ -337,8 +346,10 @@ function step() {
     run.formatSaved = true;
     saveFormat(run.engine.FS).catch(e => log('format not saved: ' + e));
   }
+  run.inViewDone = !more;
   if (more) { pump(); return; }
-  // the pages in view are done
+  // the pages in view are done: the caches the viewer asked for
+  if (flushCache()) return;
   if (P.lastMsg.status && P.lastMsg.status.busy && P.lastMsg.status.text === 'typesetting') status('live', false);
   // after a pause in typing only (as the helper's latexmk), so that edits
   // stay fast:
@@ -556,6 +567,8 @@ function onLine(run, line) {
     // (timing page n list draw png map): ms for a page picture
     const t = line.slice(1, -1).split(' ').map(Number);
     send({ type: 'timing', kind: 'page', page: t[2], list: t[3], draw: t[4], png: t[5], map: t[6] });
+  } else if (line.startsWith('(page-cache ')) {
+    send(parsePageCache(line));
   } else if (line.startsWith('(page-fields ')) {
     const t = line.slice(1, -1).split(' ');
     const fields = [];
@@ -619,6 +632,30 @@ function parseCaretDebug(line) {
   const boxes = [];
   for (let k = 0; k < m; k++, i += 4) boxes.push(v.slice(i, i + 4));
   return { type: 'caretDebug', page, points, boxes };
+}
+
+// (page-cache page n kind x0 y0 x1 y1 ... nfiles "file" npts line col x y h d ...):
+// the editable boxes of a page (hover) and the caret of each character of
+// its lines, per project file (the caret at once, before the engine answers)
+function parsePageCache(line) {
+  const toks = [];
+  const re = /"((?:[^"\\]|\\.)*)"|[^\s()]+/g;
+  let m;
+  while ((m = re.exec(line))) toks.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : m[0]);
+  let i = 1;
+  const page = +toks[i++], n = +toks[i++], fields = [];
+  for (let k = 0; k < n; k++, i += 5) fields.push({ kind: toks[i], box: toks.slice(i + 1, i + 5).map(Number) });
+  const nf = +toks[i++] || 0, files = [];
+  for (let k = 0; k < nf; k++) {
+    let path = toks[i++];
+    const np = +toks[i++], pts = [];
+    for (let j = 0; j < np; j++, i += 6) pts.push(toks.slice(i, i + 6).map(Number));
+    if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
+    if (path.startsWith('./')) path = path.slice(2);
+    const rel = safeRel(path);
+    if (rel) files.push({ path: rel, pts });
+  }
+  return { type: 'pageCache', page, fields, files };
 }
 
 // (synctex-choice "path" x0 y0 x1 y1 "current" n "label" m l0 c0 l1 c1 "old" "new" ...):
@@ -729,6 +766,8 @@ const handlers = {
     P.lastActivity = performance.now();
     if (P.run) {
       P.run.passes = 0;
+      P.run.inViewDone = false;
+      P.cacheQueue.length = 0;    // the pages change: the viewer asks again
       P.run.tWork = P.run.tEdit = performance.now();
       P.run.editTicks = P.run.editTickMs = 0;
     }
@@ -780,6 +819,14 @@ const handlers = {
   // the text of pages that are not in view (find)
   pageMaps(client, msg) {
     if (P.run) command(`(page-map ${Math.max(0, msg.first | 0)} ${Math.max(0, msg.last | 0)})`);
+  },
+  // the hover and caret cache of a page: only when the pages in view are
+  // done (it can take some 10 ms), so that it does not delay an edit
+  pageCache(client, msg) {
+    if (!P.run) return;
+    const page = Math.max(0, msg.page | 0);
+    if (!P.cacheQueue.includes(page)) P.cacheQueue.push(page);
+    if (P.run.inViewDone) flushCache();
   },
   pageFields(client, msg) {
     if (P.run) command(`(page-fields ${Math.max(0, msg.page | 0)})`);

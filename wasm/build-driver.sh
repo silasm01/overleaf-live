@@ -8,7 +8,7 @@ export PATH=/opt/wasm/emscripten:$PATH
 T=${TP:-/home/claude/tp}/src; MUPDF=${MUPDF:-/opt/wasm/src/mupdf}; LUA=${LUA:-/opt/wasm/src/lua54}; O=/opt/wasm/build/driver/obj
 OUT=${OUT:-/opt/wasm/build/driver/texpresso.js}
 mkdir -p $O $(dirname $OUT)
-CF="-O2 -sUSE_SDL=2 -I$T/dvi -I$T/include -I$T/frontend -I$LUA -I$MUPDF/include -I$MUPDF/thirdparty/freetype/include ${EXTRA_CFLAGS:-}"
+CF="-O2 -sUSE_SDL=2 -I$T/dvi -I$T/include -I$T/frontend -I$LUA -I$MUPDF/include -I$MUPDF/thirdparty/freetype/include -I$MUPDF/thirdparty/zlib ${EXTRA_CFLAGS:-}"
 srcs="frontend/main.c frontend/sprotocol.c frontend/state.c frontend/fs.c frontend/incdvi.c frontend/myabort.c
  frontend/renderer.c frontend/engine_tex.c frontend/engine_pdf.c frontend/engine_dvi.c frontend/synctex.c
  frontend/prot_parser.c frontend/sexp_parser.c frontend/json_parser.c frontend/editor.c frontend/logo.c

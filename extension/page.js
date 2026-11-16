@@ -19,14 +19,23 @@
 
   const post = (msg) => window.postMessage({ [TAG]: true, ...msg }, location.origin);
 
+  let lastSent = -1e9, firstChange = 0;
   function sendText() {
     timer = null;
-    if (view && docId) post({ kind: "doc", docId, text: view.state.doc.toString() });
+    lastSent = performance.now();
+    // t: when the first change of this message was made (latency, debug panel)
+    if (view && docId) post({ kind: "doc", docId, text: view.state.doc.toString(), t: firstChange || lastSent });
+    firstChange = 0;
   }
 
-  // several changes in quick succession become one message
+  // the first change goes at once; more changes in quick succession (40 ms)
+  // become one message
   function schedule() {
-    if (!timer) timer = setTimeout(sendText, 40);
+    if (!firstChange) firstChange = performance.now();
+    if (timer) return;
+    const wait = 40 - (performance.now() - lastSent);
+    if (wait <= 0) sendText();
+    else timer = setTimeout(sendText, wait);
   }
 
   // line from 1, column from 0 (UTF-16 units, as CodeMirror)
@@ -36,15 +45,20 @@
     const pos = view.state.selection.main.head;
     const line = view.state.doc.lineAt(pos);
     const key = `${docId}:${line.number}:${pos - line.from}`;
-    if (key === lastCursor && !force) return;
+    if (key === lastCursor && !force) { cursorAt = 0; return; }
     lastCursor = key;
-    post({ kind: "cursor", docId, line: line.number, column: pos - line.from });
+    post({ kind: "cursor", docId, line: line.number, column: pos - line.from, t: cursorAt || performance.now() });
+    cursorAt = 0;
   }
 
-  // after the text (40 ms), so that TeXpresso searches the new text
-  function scheduleCursor() {
+  // after a change: after the text (40 ms), so that TeXpresso searches the
+  // new text; a move only: at once
+  let cursorAt = 0;
+  function scheduleCursor(changed) {
+    if (!cursorAt) cursorAt = performance.now();
     clearTimeout(cursorTimer);
-    cursorTimer = setTimeout(sendCursor, 90);
+    if (changed || timer) cursorTimer = setTimeout(sendCursor, 90);
+    else sendCursor();
   }
 
   window.addEventListener("UNSTABLE_editor:extensions", (evt) => {
@@ -60,7 +74,7 @@
           update(u) {
             view = u.view;
             if (u.docChanged) schedule();
-            if (u.docChanged || u.selectionSet) scheduleCursor();
+            if (u.docChanged || u.selectionSet) scheduleCursor(u.docChanged);
           },
           destroy() {
             if (view === v) view = null;

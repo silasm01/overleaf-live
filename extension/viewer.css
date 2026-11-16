@@ -12,7 +12,10 @@
 .olive-pages { display: flex; flex-direction: column; align-items: center; gap: 12px; min-width: min-content; }
 
 /* a page: its size comes from TeXpresso (A4 until then) */
-.olive-slot { flex: none; position: relative; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.4); }
+/* contain: a change in a page (caret, hover box, new picture) is laid out
+   in the page only, not in the whole column */
+.olive-slot { flex: none; position: relative; background: #fff; box-shadow: 0 1px 6px rgba(0,0,0,.4);
+  contain: layout style; }
 .olive-slot img { display: block; width: 100%; height: 100%; }
 .olive-slot img:not([src]) { display: none; }
 /* Overleaf's "invert PDF colours" (theme button), as for its own pages */
@@ -234,3 +237,8 @@
 }
 .olive-error-link { cursor: pointer; }
 .olive-error-link:hover { background: #ffe3e3; }
+
+/* instant feedback (debug option): the chosen value until the new picture */
+.olive-instant { position: absolute; z-index: 3; display: flex; align-items: center; justify-content: center;
+  background: #fff; color: #111; font-family: "Latin Modern Math", "STIX Two Math", "Times New Roman", serif;
+  line-height: 1; pointer-events: none; box-shadow: 0 0 0 1px rgba(232,89,12,.5); }
