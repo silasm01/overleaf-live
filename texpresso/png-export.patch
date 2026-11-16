@@ -1,4 +1,4 @@
-From 8ab698f94ea2d7aba62eaa3cbdd994626541d47a Mon Sep 17 00:00:00 2001
+From f977323632b07f187b4913d7773db9f599293a0d Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -18,10 +18,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  143 +-
  src/frontend/editor.h             |   47 +
  src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 2054 +++++++++++++++++++
- src/frontend/synctex.c            | 3096 ++++++++++++++++++++++++++++-
+ src/frontend/main.c               | 2078 +++++++++++++++++++
+ src/frontend/synctex.c            | 3166 ++++++++++++++++++++++++++++-
  src/frontend/synctex.h            |  157 ++
- 15 files changed, 6003 insertions(+), 61 deletions(-)
+ 15 files changed, 6097 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
 index 4045ab1..6c3ac9a 100644
@@ -1242,10 +1242,10 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..facc64a 100644
+index c202294..e6ed717 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1346 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1370 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -2203,13 +2203,37 @@ index c202294..facc64a 100644
 +  /* a character that is not a field of its own (shared: e.g. a state's name
 +     "B", which the \state line has more than once) in a module marker with
 +     an action: the marker's field (the name, the code, the output) */
-+  if (ok && f.shared)
++  /* the same, and a character that the search found outside the marker's
++     call (e.g. a state's name "B" in a table cell of another state: the
++     \state line of B) */
++  if (ok)
 +  {
 +    int k = synctex_element_at(els, ne, x, y);
-+    if (k >= 0 && els[k].kind == 'c' && els[k].action[0])
++    /* only a marker around text (a few characters): not one whose box only
++       contains the point (e.g. a long line, with another module's label) */
++    if (k >= 0 && els[k].kind == 'c' && els[k].action[0] &&
++        els[k].x1 - els[k].x0 < 80 * 65536 && els[k].y1 - els[k].y0 < 25 * 65536)
 +    {
-+      ok = 0;
-+      hit = k;
++      int other = f.shared;
++      const char *name = els[k].file[0] ? els[k].file : main_file_name(ps);
++      size_t nl = strlen(name), fl = strlen(f.file);
++      synctex_file file;
++      synctex_range r;
++      if (!other && (fl < nl || strcmp(f.file + fl - nl, name)))
++        other = 1;
++      else if (!other && caret_file(ps->ctx, ps->doc_path, name, (int)nl, &file))
++      {
++        if (synctex_element_range(&file, &els[k], &r) &&
++            (f.l0 < r.l0 || (f.l0 == r.l0 && f.c0 < r.c0) ||
++             f.l1 > r.l1 || (f.l1 == r.l1 && f.c1 > r.c1)))
++          other = 1;
++        caret_file_free(ps->ctx, &file);
++      }
++      if (other)
++      {
++        ok = 0;
++        hit = k;
++      }
 +    }
 +  }
 +  if (!ok && hit < 0)
@@ -2592,7 +2616,7 @@ index c202294..facc64a 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +2257,592 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2281,592 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -3185,7 +3209,7 @@ index c202294..facc64a 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +2995,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +3019,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -3205,7 +3229,7 @@ index c202294..facc64a 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +3023,79 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +3047,79 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -3285,7 +3309,7 @@ index c202294..facc64a 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +3141,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +3165,35 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -3321,7 +3345,7 @@ index c202294..facc64a 100644
    }
  }
  
-@@ -1234,9 +3270,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3294,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -3334,7 +3358,7 @@ index c202294..facc64a 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1349,10 +3388,19 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3412,19 @@ bool texpresso_main(struct persistent_state *ps)
        bool advance = !ps->paused && advance_engine(ps->ctx, ui);
        send(finish_convergence, ui->eng, ps->ctx);
        int after_page_count = send(page_count, ui->eng);
@@ -3354,7 +3378,7 @@ index c202294..facc64a 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +3453,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3477,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -3366,7 +3390,7 @@ index c202294..facc64a 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +3733,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +3757,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -3375,7 +3399,7 @@ index c202294..facc64a 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..5b6f825 100644
+index 3f0b8f5..895e3cc 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -3519,7 +3543,7 @@ index 3f0b8f5..5b6f825 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +1004,3007 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +1004,3077 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -5809,6 +5833,70 @@ index 3f0b8f5..5b6f825 100644
 +   the {...} after its options and keywords (expression, table, ...); of a
 +   TikZ path with "plot" the (...) after it (its { } part, the function of
 +   (\x, {sin(\x r)})) or the {...} of "plot function {...}". */
++/* in [*a, *b) a list "k: v, k: v" (at the top level): the value of the
++   entry with the key `key` (spaces around ignored), or its part-th part of
++   "x/y" (part from 1; 0: the whole value). 0 if there is no such entry. */
++static int el_list_entry(const int *t, int *a, int *b, const char *key, int part)
++{
++  int klen = (int)strlen(key);
++  while (klen > 0 && key[klen - 1] == ' ') klen--;
++  while (*key == ' ') { key++; klen--; }
++  for (int i = *a; i < *b;)
++  {
++    /* the entry [i, j): to the next comma at depth 0 */
++    int j = i, depth = 0, colon = -1;
++    for (; j < *b; j++)
++    {
++      int c = t[j];
++      if (c == '\\') { j++; continue; }
++      if (c == '{' || c == '[' || c == '(') depth++;
++      else if (c == '}' || c == ']' || c == ')') depth--;
++      else if (depth == 0 && c == ',') break;
++      else if (depth == 0 && c == ':' && colon < 0) colon = j;
++    }
++    if (colon >= 0)
++    {
++      int k0 = i, k1 = colon;
++      while (k0 < k1 && (t[k0] == ' ' || t[k0] == '\n' || t[k0] == '\t')) k0++;
++      while (k1 > k0 && (t[k1 - 1] == ' ' || t[k1 - 1] == '\n' || t[k1 - 1] == '\t')) k1--;
++      int same = k1 - k0 == klen;
++      for (int q = 0; same && q < klen; q++)
++        if (t[k0 + q] != (unsigned char)key[q]) same = 0;
++      if (same)
++      {
++        int v0 = colon + 1, v1 = j;
++        if (part > 0)
++        {
++          /* the part-th part of "x/y" (at depth 0) */
++          int seen = 1, s0 = v0, d = 0, found = 0;
++          for (int q = v0; q <= v1; q++)
++          {
++            int c = q < v1 ? t[q] : '/';
++            if (q < v1 && c == '\\') { q++; continue; }
++            if (c == '{' || c == '[' || c == '(') d++;
++            else if (c == '}' || c == ']' || c == ')') d--;
++            else if (d == 0 && c == '/')
++            {
++              if (seen == part) { v0 = s0; v1 = q; found = 1; break; }
++              seen++;
++              s0 = q + 1;
++            }
++          }
++          if (!found) return 0;
++        }
++        while (v0 < v1 && (t[v0] == ' ' || t[v0] == '\n' || t[v0] == '\t')) v0++;
++        while (v1 > v0 && (t[v1 - 1] == ' ' || t[v1 - 1] == '\n' || t[v1 - 1] == '\t')) v1--;
++        if (v1 <= v0) return 0;
++        *a = v0;
++        *b = v1;
++        return 1;
++      }
++    }
++    i = j + 1;
++  }
++  return 0;
++}
++
 +int synctex_element_field(const synctex_file *f, const synctex_element *e,
 +                          synctex_field_t *out)
 +{
@@ -5824,14 +5912,18 @@ index 3f0b8f5..5b6f825 100644
 +  if (e->kind == 'c')
 +  {
 +    /* a module marker: "arg:N" the N-th { } argument, "key:N" its first
-+       key, "paren:N" the N-th ( ) argument, "opt:N" the N-th [ ] argument;
++       key, "paren:N" the N-th ( ) argument, "opt:N" the N-th [ ] argument,
++       "entry:N:K[:P]" in the N-th { } argument (a list "k: v, k: v"), the
++       value of the entry with key K (its P-th part "a/b", from 1);
 +       "...|a,b,c": values to offer */
 +    const char *bar = strchr(e->action, '|');
 +    if (bar) snprintf(out->options, sizeof out->options, "%s", bar + 1);
-+    int n = 0, key = 0, open = '{';
++    int n = 0, key = 0, open = '{', entry = 0, part = 0;
++    char ekey[40];
 +    if (sscanf(e->action, "arg:%d", &n) != 1)
 +    {
-+      if (sscanf(e->action, "key:%d", &n) == 1) key = 1;
++      if (sscanf(e->action, "entry:%d:%39[^:|]:%d", &n, ekey, &part) >= 2) entry = 1;
++      else if (sscanf(e->action, "key:%d", &n) == 1) key = 1;
 +      else if (sscanf(e->action, "name:%d", &n) == 1) {}
 +      else if (sscanf(e->action, "paren:%d", &n) == 1) open = '(';
 +      else if (sscanf(e->action, "opt:%d", &n) == 1) open = '[';
@@ -5852,6 +5944,8 @@ index 3f0b8f5..5b6f825 100644
 +      q++;
 +    }
 +    if (a < 0) return 0;
++    if (entry && !el_list_entry(t, &a, &b, ekey, part))
++      return 0;
 +    if (key)
 +    {
 +      int depth = 0;
