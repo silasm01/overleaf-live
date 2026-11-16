@@ -1,4 +1,4 @@
-From b7583345a5290ea581165a23ebc717c31acc9ae2 Mon Sep 17 00:00:00 2001
+From 52486676e4a052158139572fa18863cf92a2d8cf Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -18,10 +18,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  143 +-
  src/frontend/editor.h             |   47 +
  src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 2022 +++++++++++++++++++
+ src/frontend/main.c               | 2032 +++++++++++++++++++
  src/frontend/synctex.c            | 3094 ++++++++++++++++++++++++++++-
  src/frontend/synctex.h            |  157 ++
- 15 files changed, 5969 insertions(+), 61 deletions(-)
+ 15 files changed, 5979 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
 index 4045ab1..6c3ac9a 100644
@@ -1242,7 +1242,7 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..d6a01b1 100644
+index c202294..8d946c1 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
 @@ -523,6 +523,1324 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
@@ -3183,7 +3183,7 @@ index c202294..d6a01b1 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +3001,69 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +3001,79 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -3232,6 +3232,16 @@ index c202294..d6a01b1 100644
 +      /* Overleaf Live: reverse search from a point given in points */
 +      fz_buffer *buf;
 +      synctex_t *stx = send(synctex, ui->eng, &buf);
++      /* the page is not typeset now (just after an edit): the extension
++         asks again when the page comes */
++      if (cmd.synctex_scan.page >= send(page_count, ui->eng) ||
++          !stx || cmd.synctex_scan.page >= synctex_page_count(stx))
++      {
++        printf("(synctex-notready %d)\n", cmd.synctex_scan.page);
++        fflush(stdout);
++        click_mode = 0;
++        break;
++      }
 +      if (stx && buf)
 +      {
 +        float f = 1 / send(scale_factor, ui->eng);
@@ -3253,7 +3263,7 @@ index c202294..d6a01b1 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +3109,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +3119,35 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -3289,7 +3299,7 @@ index c202294..d6a01b1 100644
    }
  }
  
-@@ -1234,9 +3238,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3248,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -3302,7 +3312,7 @@ index c202294..d6a01b1 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1349,10 +3356,19 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3366,19 @@ bool texpresso_main(struct persistent_state *ps)
        bool advance = !ps->paused && advance_engine(ps->ctx, ui);
        send(finish_convergence, ui->eng, ps->ctx);
        int after_page_count = send(page_count, ui->eng);
@@ -3322,7 +3332,7 @@ index c202294..d6a01b1 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +3421,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3431,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -3334,7 +3344,7 @@ index c202294..d6a01b1 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +3701,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +3711,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);

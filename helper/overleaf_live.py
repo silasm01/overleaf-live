@@ -325,6 +325,9 @@ class Project:
                                      "also": [[int(v) for v in p.split(":")] for p in m[15].split(";")]
                                      if m[15] else []})
                 continue
+            if line.startswith("(synctex-notready "):
+                await self.send({"type": "notReady", "page": int(line[18:-1])})
+                continue
             if line.startswith("(synctex-choice "):
                 c = parse_choice(line)
                 rel = self.project_path(c["path"])

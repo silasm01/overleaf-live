@@ -373,8 +373,37 @@
     closeField();
     pendingField = null;
     scanPage = index;
-    send({ type: "scan", page: index, x, y });
+    askClick({ type: "scan", page: index, x, y });
   });
+
+  // a click or double-click on a page that the engine is typesetting again
+  // (just after an edit): asked again when the page comes, for at most
+  // 2 s after the click; a new click replaces it (no stacking)
+  let clickAsk = null;
+  function askClick(msg) {
+    clearTimeout(clickAsk && clickAsk.timer);
+    clickAsk = { msg, until: performance.now() + 2000, timer: 0 };
+    send(msg);
+  }
+  function clickNotReady(page) {
+    const c = clickAsk;
+    if (!c || c.msg.page !== page) return;
+    if (performance.now() > c.until) { clickAsk = null; return; }
+    c.waiting = true;
+    // when the page comes (pageArrived), or after 300 ms at the latest
+    clearTimeout(c.timer);
+    c.timer = setTimeout(() => clickAgain(c), 300);
+  }
+  function clickAgain(c) {
+    if (clickAsk !== c || !c.waiting) return;
+    c.waiting = false;
+    clearTimeout(c.timer);
+    if (performance.now() > c.until) { clickAsk = null; return; }
+    send(c.msg);
+  }
+  function pageArrived(page) {
+    if (clickAsk && clickAsk.waiting && clickAsk.msg.page === page) clickAgain(clickAsk);
+  }
 
   // the file tree item of a project path (or null)
   function treeItemOf(path) {
@@ -917,7 +946,7 @@
     if (e.detail > 1 || !connected) return;     // the double-click does its own
     const link = linkAt(d.pt);
     if (link) { follow(link[4]); return; }
-    send({ type: "click", page: d.pt.page, x: d.pt.x, y: d.pt.y });
+    askClick({ type: "click", page: d.pt.page, x: d.pt.x, y: d.pt.y });
   });
 
   // Ctrl+C: the selected text; Ctrl+F: find; Ctrl+Z: undo in the editor
@@ -1877,7 +1906,11 @@
       case "status":
         setStatus(msg.text, msg.busy);
         break;
+      case "notReady":
+        clickNotReady(msg.page);
+        break;
       case "page": {
+        setTimeout(() => pageArrived(msg.page), 0);
         pageCount = Math.max(msg.count, msg.page + 1);
         done = msg.done;
         const size = { w: msg.w || pageSize.w, h: msg.h || pageSize.h };

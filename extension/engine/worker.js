@@ -577,6 +577,8 @@ function onLine(run, line) {
     // (dest "name" page x y): a link target
     const m = line.match(/^\(dest "((?:[^"\\]|\\.)*)" (-?\d+) ([-\d.]+) ([-\d.]+)\)$/);
     if (m) send({ type: 'dest', name: unescape(m[1]), page: +m[2], x: +m[3], y: +m[4] });
+  } else if (line.startsWith('(synctex-notready ')) {
+    send({ type: 'notReady', page: parseInt(line.slice(18), 10) });
   } else if (line.startsWith('(synctex-choice ')) {
     const c = parseChoice(line);
     let path = c.path;
