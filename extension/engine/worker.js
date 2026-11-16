@@ -477,8 +477,9 @@ const backRe = /^\(synctex "(.*)" (-?\d+) (-?\d+)\)$/;
 // quick edit, the source text of the double-clicked field (sent before its
 // (synctex ...)); sel0..sel1: the field in the text (the text can be the
 // whole short command call); shared 1: the field shows in several places;
-// "a,b,c": values to offer in a list (from the module)
-const fieldRe = /^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01])(?: "((?:[^"\\]|\\.)*)")?)?\)$/;
+// "a,b,c": values to offer in a list (from the module); "l:c;l:c": the other
+// places of a name (a state), renamed with it
+const fieldRe = /^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01])(?: "((?:[^"\\]|\\.)*)")?(?: "([\d:;]*)")?)?\)$/;
 // (synctex-apply "path" l0 c0 l1 c1 "old" "new"): a change to make at once
 // (a K-map cell: its number added to or removed from \minterms{...})
 const applyRe = /^\(synctex-apply "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)"\)$/;
@@ -509,7 +510,8 @@ function onLine(run, line) {
     if (rel) send({ type: 'field', path: rel, from: [+m[2], +m[3]], to: [+m[4], +m[5]],
       box: [+m[6], +m[7], +m[8], +m[9]], text: unescape(m[10]),
       sel: m[11] ? [+m[11], +m[12]] : null, shared: m[13] === '1',
-      options: m[14] ? unescape(m[14]).split(',').filter(Boolean) : [] });
+      options: m[14] ? unescape(m[14]).split(',').filter(Boolean) : [],
+      also: m[15] ? m[15].split(';').map(p => p.split(':').map(Number)) : [] });
   } else if (line.startsWith('(synctex-choice ')) {
     const c = parseChoice(line);
     let path = c.path;

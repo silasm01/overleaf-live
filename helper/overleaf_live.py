@@ -243,7 +243,7 @@ class Project:
         append_re = re.compile(r'^\(append out (\d+) "(.*)"\)$')
         caret_re = re.compile(r'^\(synctex-target (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)((?: [-\d.]+){4})?( element)?\)$')
         back_re = re.compile(r'^\(synctex "(.*)" (-?\d+) (-?\d+)\)$')
-        field_re = re.compile(r'^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01])(?: "((?:[^"\\]|\\.)*)")?)?\)$')
+        field_re = re.compile(r'^\(synctex-field "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) "((?:[^"\\]|\\.)*)"(?: (\d+) (\d+) ([01])(?: "((?:[^"\\]|\\.)*)")?(?: "([\d:;]*)")?)?\)$')
         apply_re = re.compile(r'^\(synctex-apply "((?:[^"\\]|\\.)*)" (\d+) (\d+) (\d+) (\d+) "((?:[^"\\]|\\.)*)" "((?:[^"\\]|\\.)*)"\)$')
         trunc_re = re.compile(r'^\(truncate out (\d+)\)$')
         while True:
@@ -290,7 +290,9 @@ class Project:
                                      "sel": [int(m[11]), int(m[12])] if m[11] else None,
                                      "shared": m[13] == "1",
                                      "options": [o for o in unesc_sexp(m[14]).split(",") if o]
-                                     if m[14] else []})
+                                     if m[14] else [],
+                                     "also": [[int(v) for v in p.split(":")] for p in m[15].split(";")]
+                                     if m[15] else []})
                 continue
             if line.startswith("(synctex-choice "):
                 c = parse_choice(line)

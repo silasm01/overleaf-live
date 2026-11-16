@@ -36,6 +36,7 @@
   let caretTimer = null;
   let lastCursor = null;         // {path, line, column}: the editor cursor last sent
   let pendingGoto = null;        // reverse search waiting for a file to open
+  let afterOpen = null;          // { path, run }: to do when that file is open (quick edit)
   let pendingField = null;       // quick edit: the field of the last double-click
   let scanPage = -1;             // the page of the last double-click
   let docId = null;              // the file open in the editor (Overleaf's id)
@@ -354,6 +355,7 @@
       if (r.first !== view.first || r.last !== view.last) {
         view = r;
         send({ type: "view", first: r.first, last: r.last });
+        try { dbg.view(); } catch (e) { /* not set up yet */ }
       }
       writeToolbar();
     });
@@ -611,6 +613,20 @@
         setStatus(`quick edit not saved: ${f.path} is not open in the editor`, false);
         return;
       }
+      // a name (a state) with other places: when only the name changed, the
+      // name everywhere (the other places are as long as the old name)
+      const [s0, s1] = f.sel || [0, f.text.length];
+      const pre = f.text.slice(0, s0), post = f.text.slice(s1), old = f.text.slice(s0, s1);
+      if (f.also && f.also.length && f.from[0] === f.to[0] &&
+          text.startsWith(pre) && text.endsWith(post) && text.length >= pre.length + post.length) {
+        const name = text.slice(pre.length, text.length - post.length);
+        const at = [[f.from[0], f.from[1] + s0], ...f.also];
+        const edits = at.map(([l, c]) => ({ line: l, column: c, toLine: l, toColumn: c + [...old].length,
+                                            expect: old, text: name }));
+        window.postMessage({ [TAG + "Cmd"]: "replace", docId, edits }, location.origin);
+        if (f.also.length) setStatus(`renamed in ${at.length} places`, false);
+        return;
+      }
       window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: f.from[0], column: f.from[1],
         toLine: f.to[0], toColumn: f.to[1], expect: f.text, text }, location.origin);
     }
@@ -636,6 +652,15 @@
     }, 250);
   }
 
+  // run(docId) when path is open in the editor: at once, or after it was
+  // opened (the cursor goes to line, column)
+  function whenOpen(path, line, column, run) {
+    if (docId && pathOf(docId) === path) { run(docId); return; }
+    if (detached) { setStatus(`not changed: ${path} is not open in the editor`, false); return; }
+    afterOpen = { path, run: () => run(docId) };
+    gotoSource({ path, line, column });
+  }
+
   // A choice (a K-map cell: 0, 1 or D): a small menu on the page; a click
   // makes the edits of that value in the editor (page.js checks that the
   // source is still the same). Esc or a click elsewhere closes it.
@@ -657,14 +682,10 @@
         e.stopPropagation();
         closeField();
         if (!o.edits.length) return;
-        if (!docId || pathOf(docId) !== c.path) {
-          setStatus(`not changed: ${c.path} is not open in the editor`, false);
-          return;
-        }
-        window.postMessage({ [TAG + "Cmd"]: "replace", docId,
-          edits: o.edits.map(ed => ({ line: ed.from[0], column: ed.from[1], toLine: ed.to[0],
-                                      toColumn: ed.to[1], expect: ed.old, text: ed.text })) },
-          location.origin);
+        const edits = o.edits.map(ed => ({ line: ed.from[0], column: ed.from[1], toLine: ed.to[0],
+                                           toColumn: ed.to[1], expect: ed.old, text: ed.text }));
+        whenOpen(c.path, edits[0].line, edits[0].column, (id) =>
+          window.postMessage({ [TAG + "Cmd"]: "replace", docId: id, edits }, location.origin));
       });
       list.appendChild(b);
     }
@@ -702,9 +723,13 @@
     const LINE_COLORS = ["#d6336c", "#1c7ed6", "#2b8a3e", "#ae3ec9", "#0c8599"];   // line -2 .. +2
     const MAX_LOG = 400;
     const logLines = [];
-    let panel = null, mapOn = false, mapLayer = null, sentAt = 0, lastMap = null;
-    let wholePage = false, mapPage = -1, pageTimer = null;
-    let elementsOn = false, elPage = -1, elTimer = null, elLayer = null, lastElements = null;
+    let panel = null, mapOn = false, sentAt = 0;
+    let wholePage = false, elementsOn = false;
+    // the whole-page map and the elements: for the page of the caret and the
+    // pages in view; per page its last answer and its layer
+    const maps = new Map(), mapLayers = new Map(), els = new Map(), elLayers = new Map();
+    let caretPage = -1;
+    const timers = new Map();
 
     function build() {
       panel = document.createElement("div");
@@ -717,16 +742,18 @@
           <label><input type="checkbox" class="olive-debug-map"> Caret map</label>
           <label class="olive-debug-sub"><input type="checkbox" class="olive-debug-page"> Whole page</label>
           <div class="olive-debug-note">Marks where the caret goes for each character of the
-            lines around the cursor (with <i>Whole page</i>: of all lines on the page of the caret).
+            lines around the cursor (with <i>Whole page</i>: of all lines on the pages in view
+            and the page of the caret).
             Colours: <span class="olive-debug-legend"></span>.
             Orange box: a part that does not map 1:1 to its glyphs.</div>
           <div class="olive-debug-mapinfo"></div>
         </section>
         <section>
           <label><input type="checkbox" class="olive-debug-elements"> Elements (TikZ)</label>
-          <div class="olive-debug-note">Boxes of the TikZ elements on the page of the caret:
+          <div class="olive-debug-note">Boxes of the TikZ elements on the pages in view and the page of the caret:
             <span style="color:#c92a2a">pictures</span>, <span style="color:#1971c2">paths</span>,
-            <span style="color:#2f9e44">nodes</span> and <span style="color:#ae3ec9">to[...] parts</span>.
+            <span style="color:#2f9e44">nodes</span>, <span style="color:#ae3ec9">to[...] parts</span>
+            and <span style="color:#e8590c">module marks</span>.
             The label is the source line.</div>
           <div class="olive-debug-elinfo"></div>
         </section>
@@ -787,7 +814,7 @@
       send({ type: "caretDebug", on: on && !wholePage });
       clearMap();
       if (!on) return;
-      if (wholePage) requestPage(caret ? caret.page : -1, 0);
+      if (wholePage) refresh();
       else if (lastCursor) {
         sentAt = performance.now();
         send({ type: "cursor", ...lastCursor });
@@ -800,58 +827,76 @@
       if (mapOn) setMap(true);
     }
 
-    // the map of a page: again when the caret goes to another page, and
-    // after the page was typeset again (an edit)
-    function requestPage(page, delay) {
-      clearTimeout(pageTimer);
-      if (!mapOn || !wholePage || page < 0) return;
-      pageTimer = setTimeout(() => {
-        mapPage = page;
-        send({ type: "caretMap", page });
-      }, delay);
+    // the pages to show: the page of the caret and the pages in view (at most 6)
+    function wanted() {
+      const set = new Set();
+      if (caretPage >= 0) set.add(caretPage);
+      // view: the pages in view and one below
+      for (let p = Math.max(0, view.first); p < view.last && set.size < 6; p++) set.add(p);
+      return set;
     }
 
+    // ask for the pages that are wanted and not here; drop the others
+    function refresh() {
+      const want = wanted();
+      const pageMap = mapOn && wholePage;
+      for (const p of [...mapLayers.keys()]) if (!pageMap || !want.has(p)) dropMap(p);
+      for (const p of [...elLayers.keys()]) if (!elementsOn || !want.has(p)) dropElements(p);
+      for (const p of want) {
+        if (pageMap && !maps.has(p)) request("caretMap", p, 0);
+        if (elementsOn && !els.has(p)) request("caretElements", p, 0);
+      }
+    }
+
+    function request(type, page, delay) {
+      const key = type + page;
+      clearTimeout(timers.get(key));
+      if (type === "caretMap") maps.set(page, null);       // asked
+      else els.set(page, null);
+      timers.set(key, setTimeout(() => { timers.delete(key); send({ type, page }); }, delay));
+    }
+
+    // a page typeset again (an edit): its map and elements again
     function pageUpdated(page) {
-      if (mapOn && wholePage && page === mapPage) requestPage(page, 1000);
-      if (elementsOn && page === elPage) requestElements(page, 1000);
+      if (mapOn && wholePage && maps.has(page)) request("caretMap", page, 1000);
+      if (elementsOn && els.has(page)) request("caretElements", page, 1000);
     }
 
-    // the TikZ elements of the caret's page, as for the whole-page map
+    function viewChanged() {
+      if ((mapOn && wholePage) || elementsOn) refresh();
+    }
+
     function setElements(on) {
       elementsOn = on;
       if (panel) panel.querySelector(".olive-debug-elements").checked = on;
       clearElements();
-      if (on) requestElements(caret ? caret.page : -1, 0);
+      if (on) refresh();
     }
 
-    function requestElements(page, delay) {
-      clearTimeout(elTimer);
-      if (!elementsOn || page < 0) return;
-      elTimer = setTimeout(() => {
-        elPage = page;
-        send({ type: "caretElements", page });
-      }, delay);
+    function dropElements(p) {
+      const l = elLayers.get(p);
+      if (l) l.remove();
+      elLayers.delete(p);
+      els.delete(p);
     }
 
     function clearElements() {
-      if (elLayer) elLayer.remove();
-      elLayer = null;
-      lastElements = null;
-      elPage = -1;
+      for (const p of [...new Set([...elLayers.keys(), ...els.keys()])]) dropElements(p);
       if (panel) panel.querySelector(".olive-debug-elinfo").textContent = "";
     }
 
     const KIND_COLORS = { P: "#c92a2a", s: "#c92a2a", p: "#1971c2", n: "#2f9e44", t: "#ae3ec9",
                           L: "#1971c2", c: "#e8590c" };
     function elements(msg) {
-      if (!elementsOn) return;
-      lastElements = msg;
+      if (!elementsOn || !els.has(msg.page)) return;
+      els.set(msg.page, msg);
       if (msg.page >= slots().length) setSlotCount(msg.page + 1);
       const slot = slots()[msg.page];
       if (!slot) return;
-      if (elLayer) elLayer.remove();
-      elLayer = document.createElement("div");
-      elLayer.className = "olive-debug-layer";
+      const old = elLayers.get(msg.page);
+      if (old) old.remove();
+      const layer = document.createElement("div");
+      layer.className = "olive-debug-layer";
       let shown = 0;
       const seen = new Set();
       let nosrc = 0;
@@ -873,39 +918,56 @@
         tag.textContent = e.kind + (known ? e.src[0] : e.line);
         tag.style.color = color;
         b.appendChild(tag);
-        elLayer.appendChild(b);
+        layer.appendChild(b);
         shown++;
         if (!known) { nosrc++; files.add(e.file || "the main file"); }
       }
-      slot.appendChild(elLayer);
+      slot.appendChild(layer);
+      elLayers.set(msg.page, layer);
       if (panel) panel.querySelector(".olive-debug-elinfo").textContent =
         `page ${msg.page + 1}: ${shown} element box${shown === 1 ? "" : "es"}` +
         (nosrc ? `; ${nosrc} grey: no source in the project (from ${[...files].join(", ")}), so the cursor cannot show them` : "");
     }
 
+    function dropMap(p) {
+      const l = mapLayers.get(p);
+      if (l) l.remove();
+      mapLayers.delete(p);
+      maps.delete(p);
+    }
+
     function clearMap() {
-      if (mapLayer) mapLayer.remove();
-      mapLayer = null;
-      lastMap = null;
-      mapPage = -1;
+      for (const p of [...new Set([...mapLayers.keys(), ...maps.keys()])]) dropMap(p);
       if (panel) panel.querySelector(".olive-debug-mapinfo").textContent = "";
     }
 
+    // the line map (around the cursor) has the key -1; the page maps their page
     function map(msg) {
       if (!mapOn) return;
-      lastMap = msg;
-      drawMap();
+      if (wholePage) {
+        if (!maps.has(msg.page)) return;
+        maps.set(msg.page, msg);
+        drawMap(msg, msg.page);
+      } else {
+        for (const p of [...mapLayers.keys()]) if (p !== -1) dropMap(p);
+        maps.set(-1, msg);
+        drawMap(msg, -1);
+      }
     }
 
-    function drawMap() {
-      const msg = lastMap;
+    function redraw() {
+      for (const [key, msg] of maps) if (msg) drawMap(msg, key);
+    }
+
+    function drawMap(msg, key) {
       if (!msg || !settings.on) return;
       if (msg.page >= slots().length) setSlotCount(msg.page + 1);
       const slot = slots()[msg.page];
       if (!slot) return;
-      if (mapLayer) mapLayer.remove();
-      mapLayer = document.createElement("div");
-      mapLayer.className = "olive-debug-layer";
+      const old = mapLayers.get(key);
+      if (old) old.remove();
+      const layer = document.createElement("div");
+      layer.className = "olive-debug-layer";
       const w = +slot.dataset.w || pageSize.w, h = +slot.dataset.h || pageSize.h;
       const lines = [...new Set(msg.points.map((p) => p[0]))].sort((a, b) => a - b);
       const cur = lastCursor ? lastCursor.line : lines[Math.floor(lines.length / 2)] || 0;
@@ -918,16 +980,17 @@
         t.style.top = ((y - ph) / h * 100) + "%";
         t.style.height = (Math.max(ph + pd, 4) / h * 100) + "%";
         t.style.background = LINE_COLORS[k];
-        mapLayer.appendChild(t);
+        layer.appendChild(t);
         counts[line] = (counts[line] || 0) + 1;
       }
       for (const b of msg.boxes) {
         const e = document.createElement("div");
         e.className = "olive-debug-box";
         placeBox(e, slot, b);
-        mapLayer.appendChild(e);
+        layer.appendChild(e);
       }
-      slot.appendChild(mapLayer);
+      slot.appendChild(layer);
+      mapLayers.set(key, layer);
       const boxes = msg.boxes.length ? `; ${msg.boxes.length} box${msg.boxes.length > 1 ? "es" : ""}` : "";
       if (panel) panel.querySelector(".olive-debug-mapinfo").textContent = wholePage
         ? `page ${msg.page + 1}: ${msg.points.length} positions on ${lines.length} source lines${boxes}`
@@ -937,8 +1000,10 @@
     function cursor(c) { sentAt = performance.now(); }
 
     function caret(msg) {
-      if (mapOn && wholePage && msg.h + msg.d > 0.5 && msg.page !== mapPage) requestPage(msg.page, 0);
-      if (elementsOn && msg.h + msg.d > 0.5 && msg.page !== elPage) requestElements(msg.page, 0);
+      if (msg.h + msg.d > 0.5 && msg.page !== caretPage) {
+        caretPage = msg.page;
+        if ((mapOn && wholePage) || elementsOn) refresh();
+      }
       if (!panel) return;
       const ms = sentAt ? Math.round(performance.now() - sentAt) : null;
       sentAt = 0;
@@ -975,7 +1040,7 @@
       }
     }, true);
 
-    return { map, elements, caret, cursor, log, clearMap, clearElements, pageUpdated, redraw: drawMap,
+    return { map, elements, caret, cursor, log, clearMap, clearElements, pageUpdated, redraw, view: viewChanged,
       get lineMapOn() { return mapOn && !wholePage; } };
   })();
 
@@ -1093,12 +1158,9 @@
       case "apply":
         // a change made at once (a K-map cell toggled): page.js checks that
         // the source is still the same
-        if (!docId || pathOf(docId) !== msg.path) {
-          setStatus(`not changed: ${msg.path} is not open in the editor`, false);
-          break;
-        }
-        window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: msg.from[0], column: msg.from[1],
-          toLine: msg.to[0], toColumn: msg.to[1], expect: msg.old, text: msg.text }, location.origin);
+        whenOpen(msg.path, msg.from[0], msg.from[1], (id) =>
+          window.postMessage({ [TAG + "Cmd"]: "replace", docId: id, line: msg.from[0], column: msg.from[1],
+            toLine: msg.to[0], toColumn: msg.to[1], expect: msg.old, text: msg.text }, location.origin));
         break;
       case "goto": {
         // a field: select it in the editor, and open the edit box on the page
@@ -1112,8 +1174,11 @@
                        toLine: f.to[0], toColumn: one ? f.from[1] + f.sel[1] : f.to[1] });
           // a field that shows in several places (e.g. \autoterms[0] in all
           // K-map cells): an edit would change all of them, so no edit box
-          if (!f.shared) openField(f);
-          else setStatus("this value shows in several places: change it in the editor", false);
+          // (in a file that is not open: when Overleaf has opened it, else the
+          // editor takes the focus from the box at once)
+          if (f.shared) setStatus("this value shows in several places: change it in the editor", false);
+          else if (docId && pathOf(docId) === f.path) openField(f);
+          else afterOpen = { path: f.path, run: () => openField(f) };
         } else {
           gotoSource(msg);
         }
@@ -1212,6 +1277,11 @@
         const cmd = pendingGoto;
         pendingGoto = null;
         setTimeout(() => window.postMessage(cmd, location.origin), 150);
+      }
+      if (afterOpen && pathOf(docId) === afterOpen.path) {
+        const run = afterOpen.run;
+        afterOpen = null;
+        setTimeout(run, 600);   // after the goto, when the editor has the focus
       }
       return;
     }
