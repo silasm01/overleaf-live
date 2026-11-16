@@ -1,4 +1,4 @@
-From 603db9f1c883e1754080c32979cb55b799503f92 Mon Sep 17 00:00:00 2001
+From b7583345a5290ea581165a23ebc717c31acc9ae2 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -18,10 +18,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  143 +-
  src/frontend/editor.h             |   47 +
  src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 2019 +++++++++++++++++++
+ src/frontend/main.c               | 2022 +++++++++++++++++++
  src/frontend/synctex.c            | 3094 ++++++++++++++++++++++++++++-
  src/frontend/synctex.h            |  157 ++
- 15 files changed, 5966 insertions(+), 61 deletions(-)
+ 15 files changed, 5969 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
 index 4045ab1..6c3ac9a 100644
@@ -1242,10 +1242,10 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..582efbf 100644
+index c202294..d6a01b1 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1323 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1324 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1820,7 +1820,8 @@ index c202294..582efbf 100644
 +  *n = 0;
 +  if (els) { *els = NULL; *nels = 0; }
 +  float fs = send(scale_factor, eng);
-+  if (fs <= 0)
++  /* a page the engine does not have now (e.g. just after an edit) */
++  if (fs <= 0 || page < 0 || page >= send(page_count, eng))
 +    return NULL;
 +  glyph_device *dev = NULL;
 +  fz_display_list *dl = NULL;
@@ -2569,7 +2570,7 @@ index c202294..582efbf 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +2234,590 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2235,592 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -2839,6 +2840,8 @@ index c202294..582efbf 100644
 +
 +static void page_map(fz_context *ctx, ui_state *ui, int page)
 +{
++  if (page < 0 || page >= send(page_count, ui->eng))
++    return;
 +  fz_display_list *dl = send(render_page, ui->eng, ctx, page);
 +  if (!dl)
 +    return;
@@ -2942,7 +2945,7 @@ index c202294..582efbf 100644
 +/* the dest on pages [from, to): 1 if found (and reported) */
 +static int find_dest_in(fz_context *ctx, ui_state *ui, const char *name, int from, int to)
 +{
-+  for (int page = from; page < to; page++)
++  for (int page = from; page < to && page < send(page_count, ui->eng); page++)
 +  {
 +    fz_display_list *dl = send(render_page, ui->eng, ctx, page);
 +    if (!dl) continue;
@@ -3160,7 +3163,7 @@ index c202294..582efbf 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +2970,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +2973,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -3180,7 +3183,7 @@ index c202294..582efbf 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +2998,69 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +3001,69 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -3250,7 +3253,7 @@ index c202294..582efbf 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +3106,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +3109,35 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -3286,7 +3289,7 @@ index c202294..582efbf 100644
    }
  }
  
-@@ -1234,9 +3235,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3238,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -3299,7 +3302,7 @@ index c202294..582efbf 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1349,10 +3353,19 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3356,19 @@ bool texpresso_main(struct persistent_state *ps)
        bool advance = !ps->paused && advance_engine(ps->ctx, ui);
        send(finish_convergence, ui->eng, ps->ctx);
        int after_page_count = send(page_count, ui->eng);
@@ -3319,7 +3322,7 @@ index c202294..582efbf 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +3418,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3421,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -3331,7 +3334,7 @@ index c202294..582efbf 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +3698,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +3701,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
