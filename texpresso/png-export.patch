@@ -1,4 +1,4 @@
-From 52486676e4a052158139572fa18863cf92a2d8cf Mon Sep 17 00:00:00 2001
+From 8ab698f94ea2d7aba62eaa3cbdd994626541d47a Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -18,10 +18,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/editor.c             |  143 +-
  src/frontend/editor.h             |   47 +
  src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 2032 +++++++++++++++++++
- src/frontend/synctex.c            | 3094 ++++++++++++++++++++++++++++-
+ src/frontend/main.c               | 2054 +++++++++++++++++++
+ src/frontend/synctex.c            | 3096 ++++++++++++++++++++++++++++-
  src/frontend/synctex.h            |  157 ++
- 15 files changed, 5979 insertions(+), 61 deletions(-)
+ 15 files changed, 6003 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
 index 4045ab1..6c3ac9a 100644
@@ -1242,10 +1242,10 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..8d946c1 100644
+index c202294..facc64a 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1324 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1346 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -2078,6 +2078,14 @@ index c202294..8d946c1 100644
 +         fs * b.x1, fs * b.y1);
 +}
 +
++/* a file of the project's source (not one that a run writes) */
++static int is_source_file(const char *file)
++{
++  const char *ext = strrchr(file, '.');
++  return ext && (!strcmp(ext, ".tex") || !strcmp(ext, ".sty") || !strcmp(ext, ".cls") ||
++                 !strcmp(ext, ".ltx"));
++}
++
 +static int field_click(struct persistent_state *ps, ui_state *ui, int page, int x, int y)
 +{
 +  int ng = 0, ne = 0, hit = -1;
@@ -2188,6 +2196,22 @@ index c202294..8d946c1 100644
 +  }
 +  int ok = stx && synctex_field(ps->ctx, stx, sbuf, page, glyphs, ng, els, ne, x, y,
 +                                main_file_name(ps), field_load, field_unload, ps, &f);
++  /* text that a run writes (e.g. main.luaout1, the output of a Lua module)
++     is not editable there: the module marker's field instead */
++  if (ok && !is_source_file(f.file))
++    ok = 0;
++  /* a character that is not a field of its own (shared: e.g. a state's name
++     "B", which the \state line has more than once) in a module marker with
++     an action: the marker's field (the name, the code, the output) */
++  if (ok && f.shared)
++  {
++    int k = synctex_element_at(els, ne, x, y);
++    if (k >= 0 && els[k].kind == 'c' && els[k].action[0])
++    {
++      ok = 0;
++      hit = k;
++    }
++  }
 +  if (!ok && hit < 0)
 +  {
 +    /* inside a module marker (e.g. the middle of a voltage source): its field */
@@ -2229,9 +2253,7 @@ index c202294..8d946c1 100644
 +    return 0;
 +  /* only source files: not a file that the run writes (e.g. main.luaout1,
 +     the output of a Lua module) */
-+  const char *ext = strrchr(f.file, '.');
-+  if (!ext || (strcmp(ext, ".tex") && strcmp(ext, ".sty") && strcmp(ext, ".cls") &&
-+               strcmp(ext, ".ltx")))
++  if (!is_source_file(f.file))
 +    return 0;
 +  if (click_mode)
 +  {
@@ -2570,7 +2592,7 @@ index c202294..8d946c1 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +2235,592 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2257,592 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -3163,7 +3185,7 @@ index c202294..8d946c1 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +2973,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +2995,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -3183,7 +3205,7 @@ index c202294..8d946c1 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +3001,79 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +3023,79 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -3263,7 +3285,7 @@ index c202294..8d946c1 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +3119,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +3141,35 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -3299,7 +3321,7 @@ index c202294..8d946c1 100644
    }
  }
  
-@@ -1234,9 +3248,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3270,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -3312,7 +3334,7 @@ index c202294..8d946c1 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1349,10 +3366,19 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3388,19 @@ bool texpresso_main(struct persistent_state *ps)
        bool advance = !ps->paused && advance_engine(ps->ctx, ui);
        send(finish_convergence, ui->eng, ps->ctx);
        int after_page_count = send(page_count, ui->eng);
@@ -3332,7 +3354,7 @@ index c202294..8d946c1 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +3431,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3453,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -3344,7 +3366,7 @@ index c202294..8d946c1 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +3711,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +3733,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -3353,7 +3375,7 @@ index c202294..8d946c1 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..f9e5066 100644
+index 3f0b8f5..5b6f825 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -3497,7 +3519,7 @@ index 3f0b8f5..f9e5066 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +1004,3005 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +1004,3007 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -5802,7 +5824,8 @@ index 3f0b8f5..f9e5066 100644
 +  if (e->kind == 'c')
 +  {
 +    /* a module marker: "arg:N" the N-th { } argument, "key:N" its first
-+       key, "paren:N" the N-th ( ) argument; "...|a,b,c": values to offer */
++       key, "paren:N" the N-th ( ) argument, "opt:N" the N-th [ ] argument;
++       "...|a,b,c": values to offer */
 +    const char *bar = strchr(e->action, '|');
 +    if (bar) snprintf(out->options, sizeof out->options, "%s", bar + 1);
 +    int n = 0, key = 0, open = '{';
@@ -5811,6 +5834,7 @@ index 3f0b8f5..f9e5066 100644
 +      if (sscanf(e->action, "key:%d", &n) == 1) key = 1;
 +      else if (sscanf(e->action, "name:%d", &n) == 1) {}
 +      else if (sscanf(e->action, "paren:%d", &n) == 1) open = '(';
++      else if (sscanf(e->action, "opt:%d", &n) == 1) open = '[';
 +      else return 0;
 +    }
 +    int q = s0 + 1 + (int)strlen(e->name), seen = 0;
