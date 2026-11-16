@@ -134,6 +134,16 @@
   background: rgba(255,255,255,.75); padding: 0 1px; white-space: nowrap; }
 .olive-caret.olive-caret-hidden { visibility: hidden; }
 .olive-debug-el-nosrc { border-style: dashed; }
+/* debug: what a double-click edits */
+.olive-debug-field { position: absolute; box-sizing: border-box; border: 1.5px dotted; border-radius: 2px; }
+.olive-debug-field-normal { background: rgba(47,158,68,.10); }
+.olive-debug-field-special { background: rgba(174,62,201,.12); }
+.olive-debug-types { display: flex; flex-direction: column; }
+.olive-debug-swatch { display: inline-block; width: 12px; height: 8px; border: 2px solid; border-radius: 2px;
+  vertical-align: middle; }
+.olive-debug select { font: inherit; margin-left: 4px; }
+.olive-debug-timings { margin: 0; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap;
+  background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; padding: 4px 6px; }
 
 /* quick edit: the edit box of a field, under the double-clicked text */
 .olive-field { position: absolute; z-index: 5; margin-top: 2px; display: flex; flex-direction: column;

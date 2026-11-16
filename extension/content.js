@@ -1329,6 +1329,15 @@
     // the whole-page map and the elements: for the page of the caret and the
     // pages in view; per page its last answer and its layer
     const maps = new Map(), mapLayers = new Map(), els = new Map(), elLayers = new Map();
+    const fields = new Map(), fieldsAsked = new Map();
+    // what the debug shows, kept per project (also when the panel is closed)
+    const debugKey = "debug:" + projectId;
+    const dstate = { map: false, wholePage: false, elements: false, colorBy: "level",
+                     show: { top: true, mid: true, leaf: true, normal: true, special: true } };
+    function saveDebug() {
+      dstate.map = mapOn; dstate.wholePage = wholePage; dstate.elements = elementsOn;
+      chrome.storage.local.set({ [debugKey]: dstate });
+    }
     let caretPage = -1;
     const timers = new Map();
 
@@ -1350,13 +1359,23 @@
           <div class="olive-debug-mapinfo"></div>
         </section>
         <section>
-          <label><input type="checkbox" class="olive-debug-elements"> Elements (TikZ)</label>
-          <div class="olive-debug-note">Boxes of the TikZ elements on the pages in view and the page of the caret:
-            <span style="color:#c92a2a">pictures</span>, <span style="color:#1971c2">paths</span>,
-            <span style="color:#2f9e44">nodes</span>, <span style="color:#ae3ec9">to[...] parts</span>
-            and <span style="color:#e8590c">module marks</span>.
-            The label is the source line.</div>
+          <label><input type="checkbox" class="olive-debug-elements"> Boxes</label>
+          <div class="olive-debug-types"></div>
+          <label class="olive-debug-sub">Colour by
+            <select class="olive-debug-colorby"><option value="level">level</option><option value="kind">kind</option></select></label>
+          <div class="olive-debug-note">On the pages in view and the page of the caret. Elements
+            (TikZ pictures, paths, nodes, to[...] parts, module marks; label: kind and source line) by
+            their level in the tree, or by kind (<span style="color:#c92a2a">pictures</span>,
+            <span style="color:#1971c2">paths</span>, <span style="color:#2f9e44">nodes</span>,
+            <span style="color:#ae3ec9">to[...]</span>, <span style="color:#e8590c">module marks</span>).
+            Dashed: no source in the project. Editable (dotted, filled): what a double-click edits
+            (normal: an edit box; special: a menu, a value list or a name); the engine checks every
+            character of the page. The panel can close; what it shows stays, also after a reload.</div>
           <div class="olive-debug-elinfo"></div>
+        </section>
+        <section>
+          <div class="olive-debug-title">Timings</div>
+          <pre class="olive-debug-timings">(no timings yet)</pre>
         </section>
         <section>
           <div class="olive-debug-title">Caret</div>
@@ -1376,6 +1395,32 @@
       q(".olive-debug-page").addEventListener("change", (e) => setWholePage(e.target.checked));
       q(".olive-debug-page").disabled = !mapOn;
       q(".olive-debug-elements").addEventListener("change", (e) => setElements(e.target.checked));
+      const types = q(".olive-debug-types");
+      for (const [k, name, color] of TYPES) {
+        const l = document.createElement("label");
+        l.className = "olive-debug-sub";
+        l.innerHTML = `<input type="checkbox"> <span class="olive-debug-swatch" style="border-color:${color}"></span> ${name}`;
+        const box = l.querySelector("input");
+        box.checked = dstate.show[k];
+        box.addEventListener("change", () => {
+          dstate.show[k] = box.checked;
+          saveDebug();
+          if (elementsOn && (k === "normal" || k === "special") && box.checked) refresh();
+          redrawBoxes();
+        });
+        types.appendChild(l);
+      }
+      q(".olive-debug-colorby").value = dstate.colorBy;
+      q(".olive-debug-colorby").addEventListener("change", (e) => {
+        dstate.colorBy = e.target.value;
+        saveDebug();
+        redrawBoxes();
+      });
+      q(".olive-debug-map").checked = mapOn;
+      q(".olive-debug-page").checked = wholePage;
+      q(".olive-debug-page").disabled = !mapOn;
+      q(".olive-debug-elements").checked = elementsOn;
+      showTimings();
       showLegend();
       q(".olive-debug-copy").addEventListener("click", () => {
         navigator.clipboard.writeText(logLines.join("\n")).catch(() => {});
@@ -1386,11 +1431,11 @@
       showLog();
     }
 
+    // the panel opens and closes; what it shows on the pages stays
     function toggle() {
       if (!panel) build();
       else panel.hidden = !panel.hidden;
-      if (panel.hidden && mapOn) setMap(false);
-      if (panel.hidden && elementsOn) setElements(false);
+      if (!panel.hidden) { showLog(); showTimings(); }
       if (!panel.hidden) {
         panel.querySelector(".olive-debug-version").textContent =
           "v" + chrome.runtime.getManifest().version + " · " + (engine === "wsl" ? "WSL helper" : "browser engine");
@@ -1408,6 +1453,7 @@
     // caret (caretDebug on); the whole page only when asked (caretMap)
     function setMap(on) {
       mapOn = on;
+      saveDebug();
       if (panel) {
         panel.querySelector(".olive-debug-map").checked = on;
         panel.querySelector(".olive-debug-page").disabled = !on;
@@ -1425,7 +1471,63 @@
     function setWholePage(on) {
       wholePage = on;
       if (panel) showLegend();
+      saveDebug();
       if (mapOn) setMap(true);
+    }
+
+    // the saved state (at the start), and again after a new connection
+    function load() {
+      chrome.storage.local.get(debugKey, (r) => {
+        const d = r[debugKey];
+        if (!d) return;
+        Object.assign(dstate, d, { show: Object.assign(dstate.show, d.show || {}) });
+        wholePage = !!d.wholePage;
+        mapOn = !!d.map;
+        elementsOn = !!d.elements;
+        if (connected) resume();
+      });
+    }
+
+    function resume() {
+      clearMap();
+      for (const p of [...new Set([...elLayers.keys(), ...els.keys(), ...fields.keys()])]) dropElements(p);
+      send({ type: "caretDebug", on: mapOn && !wholePage });
+      if ((mapOn && wholePage) || elementsOn) refresh();
+      else if (mapOn && lastCursor) send({ type: "cursor", ...lastCursor });
+    }
+
+    // --- timings (debug panel) ---
+    const T = { edits: [], pages: new Map() };
+    function timing(m) {
+      if (m.kind === "edit") { T.edits.push(m.ms); if (T.edits.length > 20) T.edits.shift(); T.edit = m; }
+      else if (m.kind === "page") T.pages.set(m.page, m);
+      else T[m.kind] = m;
+      if (panel && !panel.hidden) showTimings();
+    }
+    function showTimings() {
+      if (!panel) return;
+      const lines = [];
+      const avg = (a) => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0;
+      if (T.start) {
+        lines.push(`start         ${T.start.ms} ms to the first page`);
+        for (const [what, ms] of T.start.parts || []) lines.push(`  ${String(ms).padStart(6)} ms  ${what}`);
+      }
+      if (T.edit) lines.push(`live edit     ${T.edit.ms} ms to a new page (avg ${avg(T.edits)} of ${T.edits.length})` +
+        (T.edit.ticks !== undefined ? `; ${T.edit.ticks} ticks, ${T.edit.tickMs} ms in the engine` : ""));
+      const pg = [...T.pages.values()];
+      if (pg.length) {
+        const last = pg[pg.length - 1];
+        const a = (k) => (pg.reduce((x, p) => x + p[k], 0) / pg.length).toFixed(1);
+        lines.push(`page picture  list ${last.list} + draw ${last.draw} + PNG ${last.png} + map ${last.map} ms (page ${last.page + 1})`);
+        lines.push(`  average     list ${a("list")} + draw ${a("draw")} + PNG ${a("png")} + map ${a("map")} ms (${pg.length} pages)`);
+      }
+      if (T.frame) lines.push(`frames        ${T.frame.ticks} ticks/s, ${T.frame.avg} ms avg, ${T.frame.max} ms max, busy ${T.frame.busy}%`);
+      else if (engine === "wsl") lines.push("frames        (browser engine only)");
+      if (T.deep) lines.push(`deep          ${T.deep.ms} ms to the end of the document` +
+        (T.deep.passes !== undefined ? ` (${T.deep.passes} extra pass${T.deep.passes === 1 ? "" : "es"})` : ""));
+      if (T.lua) lines.push(`Lua (WSL)     ${T.lua.ms} ms for latexmk`);
+      if (T.fields) lines.push(`editable      ${T.fields.ms} ms for page ${T.fields.page + 1} (${T.fields.n} boxes)`);
+      panel.querySelector(".olive-debug-timings").textContent = lines.length ? lines.join("\n") : "(no timings yet)";
     }
 
     // the pages to show: the page of the caret and the pages in view (at most 6)
@@ -1446,6 +1548,7 @@
       for (const p of want) {
         if (pageMap && !maps.has(p)) request("caretMap", p, 0);
         if (elementsOn && !els.has(p)) request("caretElements", p, 0);
+        if (elementsOn && wantFields() && !fields.has(p)) request("pageFields", p, 0);
       }
     }
 
@@ -1453,14 +1556,20 @@
       const key = type + page;
       clearTimeout(timers.get(key));
       if (type === "caretMap") maps.set(page, null);       // asked
+      else if (type === "pageFields") fields.set(page, null);
       else els.set(page, null);
-      timers.set(key, setTimeout(() => { timers.delete(key); send({ type, page }); }, delay));
+      timers.set(key, setTimeout(() => {
+        timers.delete(key);
+        if (type === "pageFields") fieldsAsked.set(page, performance.now());
+        send({ type, page });
+      }, delay));
     }
 
     // a page typeset again (an edit): its map and elements again
     function pageUpdated(page) {
       if (mapOn && wholePage && maps.has(page)) request("caretMap", page, 1000);
       if (elementsOn && els.has(page)) request("caretElements", page, 1000);
+      if (elementsOn && fields.has(page)) request("pageFields", page, 1500);
     }
 
     function viewChanged() {
@@ -1471,6 +1580,7 @@
       elementsOn = on;
       if (panel) panel.querySelector(".olive-debug-elements").checked = on;
       clearElements();
+      saveDebug();
       if (on) refresh();
     }
 
@@ -1479,55 +1589,120 @@
       if (l) l.remove();
       elLayers.delete(p);
       els.delete(p);
+      fields.delete(p);
     }
 
     function clearElements() {
-      for (const p of [...new Set([...elLayers.keys(), ...els.keys()])]) dropElements(p);
+      for (const p of [...new Set([...elLayers.keys(), ...els.keys(), ...fields.keys()])]) dropElements(p);
       if (panel) panel.querySelector(".olive-debug-elinfo").textContent = "";
     }
 
+    // Boxes: the elements (by level in the tree of elements, or by kind) and
+    // what a double-click edits (normal: an edit box; special: a module
+    // marker with a menu, a value list or a name)
     const KIND_COLORS = { P: "#c92a2a", s: "#c92a2a", p: "#1971c2", n: "#2f9e44", t: "#ae3ec9",
                           L: "#1971c2", c: "#e8590c" };
+    const TYPES = [
+      ["top", "Top parents", "#c92a2a"], ["mid", "Intermediary", "#f08c00"],
+      ["leaf", "Lowest", "#1971c2"], ["normal", "Normally editable", "#2f9e44"],
+      ["special", "Specially editable", "#ae3ec9"]];
+    const typeColor = Object.fromEntries(TYPES.map(([k, , c]) => [k, c]));
+    const wantFields = () => dstate.show.normal || dstate.show.special;
+
     function elements(msg) {
       if (!elementsOn || !els.has(msg.page)) return;
       els.set(msg.page, msg);
-      if (msg.page >= slots().length) setSlotCount(msg.page + 1);
-      const slot = slots()[msg.page];
+      drawBoxes(msg.page);
+    }
+
+    function pageFields(msg) {
+      if (!elementsOn || !fields.has(msg.page)) return;
+      const asked = fieldsAsked.get(msg.page);
+      fields.set(msg.page, { list: msg.fields, ms: asked ? Math.round(performance.now() - asked) : null });
+      if (asked) timing({ kind: "fields", page: msg.page, ms: Math.round(performance.now() - asked), n: msg.fields.length });
+      drawBoxes(msg.page);
+    }
+
+    // level of each element: top (no parent), lowest (no child), between
+    function levels(list) {
+      const area = (b) => (b[2] - b[0]) * (b[3] - b[1]);
+      const inside = (a, b) => a[0] >= b[0] - 0.5 && a[1] >= b[1] - 0.5 && a[2] <= b[2] + 0.5 && a[3] <= b[3] + 0.5;
+      const parent = list.map((e, i) => {
+        let best = -1;
+        list.forEach((o, j) => {
+          if (j === i || o.depth >= e.depth || !inside(e.box, o.box)) return;
+          if (best < 0 || o.depth > list[best].depth || (o.depth === list[best].depth && area(o.box) < area(list[best].box))) best = j;
+        });
+        return best;
+      });
+      const hasChild = new Set(parent.filter((p) => p >= 0));
+      return list.map((e, i) => parent[i] < 0 ? "top" : hasChild.has(i) ? "mid" : "leaf");
+    }
+
+    function drawBoxes(page) {
+      const msg = els.get(page), fl = fields.get(page);
+      if (page >= slots().length) setSlotCount(page + 1);
+      const slot = slots()[page];
       if (!slot) return;
-      const old = elLayers.get(msg.page);
+      const old = elLayers.get(page);
       if (old) old.remove();
       const layer = document.createElement("div");
       layer.className = "olive-debug-layer";
-      let shown = 0;
-      const seen = new Set();
+      const counts = { top: 0, mid: 0, leaf: 0, normal: 0, special: 0 };
       let nosrc = 0;
       const files = new Set();
-      for (const e of msg.elements) {
-        if (e.box[0] < 0) continue;   // draws nothing
-        const key = e.box.join(",");
-        if (seen.has(key)) continue;
-        seen.add(key);
-        // no source: TeX read it from a file that is not in the project
-        // (e.g. main-usage.tex, which the catalog's usage environment writes)
-        const known = !!e.src[0];
-        const color = known ? KIND_COLORS[e.kind] || "#555" : "#868e96";
+      if (msg) {
+        const seen = new Set();
+        const list = msg.elements.filter((e) => {
+          if (e.box[0] < 0) return false;   // draws nothing
+          // the same box twice (e.g. a picture and its only scope): one box
+          const key = e.box.map((v) => v.toFixed(1)).join(",");
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        const lv = levels(list);
+        list.forEach((e, i) => {
+          const level = lv[i];
+          if (!dstate.show[level]) return;
+          counts[level]++;
+          // no source: TeX read it from a file that is not in the project
+          // (e.g. main-usage.tex, which the catalog's usage environment writes)
+          const known = !!e.src[0];
+          // by kind: grey when there is no source; by level: dashed only
+          const color = dstate.colorBy === "level" ? typeColor[level] : known ? KIND_COLORS[e.kind] || "#555" : "#868e96";
+          const b = document.createElement("div");
+          b.className = "olive-debug-el" + (known ? "" : " olive-debug-el-nosrc");
+          b.style.borderColor = color;
+          placeBox(b, slot, e.box);
+          const tag = document.createElement("span");
+          tag.textContent = e.kind + (known ? e.src[0] : e.line);
+          tag.style.color = color;
+          b.appendChild(tag);
+          layer.appendChild(b);
+          if (!known) { nosrc++; files.add(e.file || "the main file"); }
+        });
+      }
+      if (fl) for (const f of fl.list) {
+        const type = f.kind === "s" ? "special" : "normal";
+        if (!dstate.show[type]) continue;
+        counts[type]++;
         const b = document.createElement("div");
-        b.className = "olive-debug-el" + (known ? "" : " olive-debug-el-nosrc");
-        b.style.borderColor = color;
-        placeBox(b, slot, e.box);
-        const tag = document.createElement("span");
-        tag.textContent = e.kind + (known ? e.src[0] : e.line);
-        tag.style.color = color;
-        b.appendChild(tag);
+        b.className = "olive-debug-field olive-debug-field-" + type;
+        b.style.borderColor = typeColor[type];
+        placeBox(b, slot, f.box);
         layer.appendChild(b);
-        shown++;
-        if (!known) { nosrc++; files.add(e.file || "the main file"); }
       }
       slot.appendChild(layer);
-      elLayers.set(msg.page, layer);
+      elLayers.set(page, layer);
       if (panel) panel.querySelector(".olive-debug-elinfo").textContent =
-        `page ${msg.page + 1}: ${shown} element box${shown === 1 ? "" : "es"}` +
-        (nosrc ? `; ${nosrc} grey: no source in the project (from ${[...files].join(", ")}), so the cursor cannot show them` : "");
+        `page ${page + 1}: ` + TYPES.filter(([k]) => dstate.show[k]).map(([k, name]) => `${counts[k]} ${name.toLowerCase()}`).join(", ") +
+        (fl === null && wantFields() ? " (editable: computing…)" : "") +
+        (nosrc ? `; ${nosrc} dashed: no source in the project (from ${[...files].join(", ")})` : "");
+    }
+
+    function redrawBoxes() {
+      for (const p of elLayers.keys()) drawBoxes(p);
     }
 
     function dropMap(p) {
@@ -1641,7 +1816,9 @@
       }
     }, true);
 
-    return { map, elements, caret, cursor, log, clearMap, clearElements, pageUpdated, redraw, view: viewChanged,
+    load();
+    return { map, elements, pageFields, timing, resume, caret, cursor, log, clearMap, clearElements, pageUpdated,
+      redraw, view: viewChanged,
       get lineMapOn() { return mapOn && !wholePage; } };
   })();
 
@@ -1678,7 +1855,7 @@
   function startSession() {
     lastText.clear();
     send({ type: "hello", project: projectId, main: settings.main, lua: settings.lua });
-    if (dbg.lineMapOn) send({ type: "caretDebug", on: true });
+    dbg.resume();
     view = { first: -1, last: -1 };
     sendWidth();
     checkView();
@@ -1751,6 +1928,12 @@
         break;
       case "caretElements":
         dbg.elements(msg);
+        break;
+      case "pageFields":
+        dbg.pageFields(msg);
+        break;
+      case "timing":
+        dbg.timing(msg);
         break;
       case "debug":
         dbg.log(msg.text);

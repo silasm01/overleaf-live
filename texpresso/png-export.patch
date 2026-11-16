@@ -1,4 +1,4 @@
-From 73846e0b4916b42e22f4b2a2d9e09d7c2cd643eb Mon Sep 17 00:00:00 2001
+From 603db9f1c883e1754080c32979cb55b799503f92 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -15,13 +15,13 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/engine/engine/xetex-synctex.c |   44 +-
  src/engine/engine/xetex-xetex0.c  |   25 +-
  src/engine/engine/xetex-xetexd.h  |   11 +
- src/frontend/editor.c             |  132 +-
- src/frontend/editor.h             |   46 +
+ src/frontend/editor.c             |  143 +-
+ src/frontend/editor.h             |   47 +
  src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 1851 +++++++++++++++++
- src/frontend/synctex.c            | 3088 ++++++++++++++++++++++++++++-
- src/frontend/synctex.h            |  154 ++
- 15 files changed, 5777 insertions(+), 61 deletions(-)
+ src/frontend/main.c               | 2019 +++++++++++++++++++
+ src/frontend/synctex.c            | 3094 ++++++++++++++++++++++++++++-
+ src/frontend/synctex.h            |  157 ++
+ 15 files changed, 5966 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
 index 4045ab1..6c3ac9a 100644
@@ -781,7 +781,7 @@ index 183c218..ee3637a 100644
  #define GLUE_SPEC_stretch_order(p) mem[p].b16.s1 /* aka "type" of a node */
  #define GLUE_SPEC_shrink_order(p) mem[p].b16.s0 /* aka "subtype" of a node */
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
-index 6face98..4eec3d8 100644
+index 6face98..b2b7506 100644
 --- a/src/frontend/editor.c
 +++ b/src/frontend/editor.c
 @@ -219,6 +219,50 @@ bool editor_parse(fz_context *ctx,
@@ -835,7 +835,7 @@ index 6face98..4eec3d8 100644
    else if (strcmp(verb, "rescan") == 0)
    {
      if (len != 1)
-@@ -252,23 +296,109 @@ bool editor_parse(fz_context *ctx,
+@@ -252,23 +296,120 @@ bool editor_parse(fz_context *ctx,
      *out = (struct editor_command){.tag = EDIT_STAY_ON_TOP,
                                     .stay_on_top = {.status = status}};
    }
@@ -912,6 +912,17 @@ index 6face98..4eec3d8 100644
 +                                   .page_map = {.first = val_number(ctx, first),
 +                                                .last = val_number(ctx, last)}};
 +  }
++  else if (strcmp(verb, "page-fields") == 0)
++  {
++    // (page-fields page): the editable things of a page (debug panel)
++    if (len != 2)
++      goto arity;
++    val page = val_array_get(ctx, stack, command, 1);
++    if (!val_is_number(page))
++      goto arguments;
++    *out = (struct editor_command){.tag = EDIT_PAGE_FIELDS,
++                                   .page_map = {.first = val_number(ctx, page), .last = 0}};
++  }
 +  else if (strcmp(verb, "find-dest") == 0)
 +  {
 +    // (find-dest "name"): the page and point of a hyperref target
@@ -947,7 +958,7 @@ index 6face98..4eec3d8 100644
    {
      if (len != 1)
 diff --git a/src/frontend/editor.h b/src/frontend/editor.h
-index 05fdd1c..0a553aa 100644
+index 05fdd1c..199f006 100644
 --- a/src/frontend/editor.h
 +++ b/src/frontend/editor.h
 @@ -28,6 +28,9 @@ enum EDITOR_COMMAND
@@ -960,7 +971,7 @@ index 05fdd1c..0a553aa 100644
    EDIT_MAP_WINDOW,
    EDIT_UNMAP_WINDOW,
    EDIT_CROP,
-@@ -37,6 +40,14 @@ enum EDITOR_COMMAND
+@@ -37,6 +40,15 @@ enum EDITOR_COMMAND
    EDIT_RESUME,
    EDIT_RERUN,
    EDIT_RERUN_ONCE,
@@ -972,10 +983,11 @@ index 05fdd1c..0a553aa 100644
 +  EDIT_SYNCTEX_CLICK,
 +  EDIT_PAGE_MAP,
 +  EDIT_FIND_DEST,
++  EDIT_PAGE_FIELDS,
  };
  
  struct editor_change
-@@ -105,8 +116,30 @@ struct editor_command
+@@ -105,8 +117,30 @@ struct editor_command
      struct {
        const char *path;
        int line;
@@ -1006,7 +1018,7 @@ index 05fdd1c..0a553aa 100644
      struct {
        float x, y, w, h;
      } map_window;
-@@ -136,6 +169,19 @@ struct editor_command
+@@ -136,6 +170,19 @@ struct editor_command
  
      struct {
      } rerun_once;
@@ -1230,10 +1242,10 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..c51ca46 100644
+index c202294..582efbf 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1174 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1323 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -2405,10 +2417,159 @@ index c202294..c51ca46 100644
 +  fflush(stdout);
 +}
 +
++/* (page-fields page): the editable things of a page, for the debug panel:
++   (page-fields page n kind x0 y0 x1 y1 ...), kind n (a double-click opens an
++   edit box: text fields, labels, plot lines) or s (a module marker with an
++   action: a menu, a list of values, a name) */
++struct pf_list { int n, cap; struct { char kind; synctex_box b; } *v; };
++
++static void pf_add(struct pf_list *l, char kind, synctex_box b)
++{
++  if (b.x1 <= b.x0 || b.y1 <= b.y0) return;
++  for (int i = 0; i < l->n; i++)
++    if (l->v[i].kind == kind && l->v[i].b.x0 == b.x0 && l->v[i].b.y0 == b.y0 &&
++        l->v[i].b.x1 == b.x1 && l->v[i].b.y1 == b.y1)
++      return;
++  if (l->n == l->cap)
++  {
++    l->cap = l->cap ? 2 * l->cap : 64;
++    l->v = realloc(l->v, l->cap * sizeof(*l->v));
++  }
++  l->v[l->n].kind = kind;
++  l->v[l->n].b = b;
++  l->n++;
++}
++
++static void page_fields(struct persistent_state *ps, ui_state *ui, int page)
++{
++  fz_context *ctx = ps->ctx;
++  fz_buffer *buf;
++  synctex_t *stx = send(synctex, ui->eng, &buf);
++  struct pf_list list = {0};
++  float fs = send(scale_factor, ui->eng);
++  if (stx && page >= 0 && page < synctex_page_count(stx))
++  {
++    int ng = 0, ne = 0;
++    synctex_element *els = NULL;
++    synctex_glyph *glyphs = page_scan(ctx, ui->eng, page, &ng, &els, &ne);
++    synctex_resolve_elements(ctx, stx, buf, page, els, ne);
++    char *done = calloc(ng + 1, 1);
++
++    /* module markers with an action, and plot lines */
++    for (int k = 0; k < ne; k++)
++    {
++      const synctex_element *e = &els[k];
++      if (!e->has_box) continue;
++      synctex_box eb = {e->x0, e->y0, e->x1, e->y1};
++      if (e->kind == 'c' && e->action[0])
++        pf_add(&list, 's', eb);
++      else if (e->kind == 'L' || e->kind == 'p')
++      {
++        const char *name = e->file[0] ? e->file : main_file_name(ps);
++        synctex_file file;
++        static synctex_field_t f;
++        if (caret_file(ctx, ps->doc_path, name, (int)strlen(name), &file))
++        {
++          if (synctex_element_field(&file, e, &f)) pf_add(&list, 'n', eb);
++          caret_file_free(ctx, &file);
++        }
++      }
++    }
++
++    /* glyphs in elements: labels (as a double-click on them) */
++    for (int i = 0; i < ng; i++)
++    {
++      const synctex_glyph *g = &glyphs[i];
++      int gx = (g->x0 + g->x1) / 2, gy = g->y;
++      if (synctex_element_at(els, ne, gx, gy) < 0) continue;
++      done[i] = 1;
++      static synctex_field_t f;
++      if (synctex_field(ctx, stx, buf, page, glyphs, ng, els, ne, gx,
++                        g->y0 < g->y1 ? (g->y0 + g->y1) / 2 : gy - 2 * 65536,
++                        main_file_name(ps), field_load, field_unload, ps, &f) == 1 && !f.shared)
++        pf_add(&list, 'n', f.box);
++    }
++
++    /* text: the caret map of each file's lines on the page; a glyph is the
++       character whose caret is at its left edge; its field, as a box from
++       the carets of the field's characters */
++    enum { MAXLINES = 4096 };
++    static int pairs[2 * MAXLINES];
++    static int lines[MAXLINES];
++    int n = synctex_page_lines(ctx, stx, buf, page, pairs, MAXLINES);
++    for (int i = 0; i < n;)
++    {
++      int tag = pairs[2 * i], k = 0;
++      while (i < n && pairs[2 * i] == tag)
++        lines[k++] = pairs[2 * i++ + 1];
++      const char *name, *base;
++      int len = synctex_input_name(stx, buf, tag, &name), blen, off = 0, nl;
++      if (len > 0 && synctex_input_alias(name, len, &base, &blen, &off, &nl))
++      {
++        name = base;
++        len = blen;
++      }
++      synctex_file file;
++      if (len <= 0 || !caret_file(ctx, ps->doc_path, name, len, &file))
++        continue;
++      synctex_caret_info info = {0};
++      info.pts = caret_pts;
++      info.cappts = CAP_PTS;
++      info.boxes = caret_boxes;
++      info.capboxes = CAP_BOXES;
++      synctex_caret_map(ctx, stx, buf, page, glyphs, ng, tag, &file, lines, k, off, &info);
++      for (int gi = 0; gi < ng; gi++)
++      {
++        if (done[gi]) continue;
++        const synctex_glyph *g = &glyphs[gi];
++        int best = -1;
++        double bd = 0;
++        for (int j = 0; j < info.npts; j++)
++        {
++          double dx = caret_pts[j].x - g->x0, dy = caret_pts[j].y - g->y;
++          if (fabs(dy) > 2 * 65536 || fabs(dx) > 65536) continue;
++          double d = fabs(dx);
++          if (best < 0 || d < bd - 16384 ||
++              (fabs(d - bd) <= 16384 && caret_pts[j].line == caret_pts[best].line &&
++               caret_pts[j].col > caret_pts[best].col))
++          { best = j; bd = d; }
++        }
++        if (best < 0) continue;
++        done[gi] = 1;
++        if (caret_pts[best].line < 1 || caret_pts[best].line > file.nlines) continue;
++        int p = file.line_off[caret_pts[best].line - 1] + caret_pts[best].col, a, b;
++        if (!synctex_text_field(file.text, file.len, p, &a, &b)) continue;
++        synctex_box tb = {g->x0, g->y0 < g->y1 ? g->y0 : g->y - 7 * 65536,
++                          g->x1, g->y0 < g->y1 ? g->y1 : g->y + 2 * 65536};
++        for (int j = 0; j < info.npts; j++)
++        {
++          if (caret_pts[j].line < 1 || caret_pts[j].line > file.nlines) continue;
++          int q = file.line_off[caret_pts[j].line - 1] + caret_pts[j].col;
++          if (q < a || q > b || abs(caret_pts[j].y - g->y) > 30 * 65536) continue;
++          if (caret_pts[j].x < tb.x0) tb.x0 = caret_pts[j].x;
++          if (caret_pts[j].x > tb.x1) tb.x1 = caret_pts[j].x;
++        }
++        pf_add(&list, 'n', tb);
++      }
++      caret_file_free(ctx, &file);
++    }
++    free(done);
++    fz_free(ctx, els);
++    drop_glyphs(ctx, glyphs, ng);
++  }
++  printf("(page-fields %d %d", page, list.n);
++  for (int i = 0; i < list.n; i++)
++    printf(" %c %.2f %.2f %.2f %.2f", list.v[i].kind, fs * list.v[i].b.x0, fs * list.v[i].b.y0,
++           fs * list.v[i].b.x1, fs * list.v[i].b.y1);
++  printf(")\n");
++  fflush(stdout);
++  free(list.v);
++}
++
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +2085,575 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2234,590 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -2889,9 +3050,18 @@ index c202294..c51ca46 100644
 +  return h;
 +}
 +
++static double now_ms(void)
++{
++  struct timespec ts;
++  clock_gettime(CLOCK_MONOTONIC, &ts);
++  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
++}
++
 +static void export_one(fz_context *ctx, ui_state *ui, int page, int count, int done)
 +{
++  double t0 = now_ms();
 +  fz_display_list *dl = send(render_page, ui->eng, ctx, page);
++  double t_list = now_ms();
 +  if (!dl)
 +    return;
 +  fz_pixmap *pix = NULL;
@@ -2914,6 +3084,7 @@ index c202294..c51ca46 100644
 +    dev = fz_new_draw_device(ctx, fz_identity, pix);
 +    fz_run_display_list(ctx, dl, dev, ctm, fz_infinite_rect, NULL);
 +    fz_close_device(ctx, dev);
++    double t_draw = now_ms();
 +
 +    // the same picture as last time: nothing to report (the pixels are
 +    // hashed before the slower PNG encoding)
@@ -2947,9 +3118,14 @@ index c202294..c51ca46 100644
 +    fclose(f);
 +    export_hash[page] = h;
 +    // the page size in points (the front-end needs it for zoom levels)
++    double t_png = now_ms();
 +    printf("(page-image %d %d %d \"%s\" %.2f %.2f)\n", page, count, done, path,
 +           bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
 +    page_map(ctx, ui, page);
++    /* debug panel: the times of this page (ms): display list (typesetting
++       is before), drawing, PNG, page map */
++    printf("(timing page %d %.1f %.1f %.1f %.1f)\n", page, t_list - t0, t_draw - t_list,
++           t_png - t_draw, now_ms() - t_png);
 +  }
 +  fz_always(ctx)
 +  {
@@ -2984,7 +3160,7 @@ index c202294..c51ca46 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +2806,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +2970,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -3004,7 +3180,7 @@ index c202294..c51ca46 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +2834,65 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +2998,69 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -3042,6 +3218,10 @@ index c202294..c51ca46 100644
 +      find_dest(ps->ctx, ui, cmd.find_dest.name);
 +      break;
 +
++    case EDIT_PAGE_FIELDS:
++      page_fields(ps, ui, cmd.page_map.first);
++      break;
++
 +    case EDIT_SYNCTEX_CLICK:
 +    case EDIT_SYNCTEX_SCAN:
 +    {
@@ -3070,7 +3250,7 @@ index c202294..c51ca46 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +2938,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +3106,35 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -3106,7 +3286,7 @@ index c202294..c51ca46 100644
    }
  }
  
-@@ -1234,9 +3067,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3235,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -3119,7 +3299,7 @@ index c202294..c51ca46 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1349,10 +3185,19 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3353,19 @@ bool texpresso_main(struct persistent_state *ps)
        bool advance = !ps->paused && advance_engine(ps->ctx, ui);
        send(finish_convergence, ui->eng, ps->ctx);
        int after_page_count = send(page_count, ui->eng);
@@ -3139,7 +3319,7 @@ index c202294..c51ca46 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +3250,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3418,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -3151,7 +3331,7 @@ index c202294..c51ca46 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +3530,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +3698,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -3160,7 +3340,7 @@ index c202294..c51ca46 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..0d3c7f4 100644
+index 3f0b8f5..f9e5066 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -3304,7 +3484,7 @@ index 3f0b8f5..0d3c7f4 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +1004,2999 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +1004,3005 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -5950,6 +6130,12 @@ index 3f0b8f5..0d3c7f4 100644
 +  }
 +}
 +
++/* the field around the character p of a text (as a double-click finds it) */
++int synctex_text_field(const int *text, int len, int p, int *a, int *b)
++{
++  return field_span(text, len, p, a, b);
++}
++
 +int synctex_field(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
 +                  const synctex_glyph *glyphs, int ng, const synctex_element *els, int ne,
 +                  int x, int y, const char *main_file,
@@ -6305,7 +6491,7 @@ index 3f0b8f5..0d3c7f4 100644
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..92a29a8 100644
+index cfff199..65e4674 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -6316,7 +6502,7 @@ index cfff199..92a29a8 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,159 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,162 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -6470,6 +6656,9 @@ index cfff199..92a29a8 100644
 +   element (into out->also); the field must be set (l0 c0 .. l1 c1, sel). */
 +void synctex_field_renames(const synctex_file *f, const synctex_element *e,
 +                           synctex_field_t *out);
++/* The field (what a double-click edits) around the character p of a text:
++   [*a, *b); 0 if none */
++int synctex_text_field(const int *text, int len, int p, int *a, int *b);
 +int synctex_field(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int page,
 +                  const synctex_glyph *glyphs, int ng, const synctex_element *els, int ne,
 +                  int x, int y, const char *main_file,

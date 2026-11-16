@@ -228,7 +228,14 @@ async function start() {
     if (!P.files.has(P.main)) { status(`${P.main || 'main.tex'} not found in the project`); return; }
     status('starting the engine', true);
     const t0 = performance.now();
-    const lap = (what) => log(`start: ${what} at ${Math.round(performance.now() - t0)} ms`);
+    const parts = [];
+    let tLap = t0;
+    const lap = (what) => {
+      const now = performance.now();
+      log(`start: ${what} at ${Math.round(now - t0)} ms`);
+      parts.push([what, Math.round(now - tLap)]);
+      tLap = now;
+    };
     const tl = await getTl();
     lap('TeX Live index ready');
     // download what is surely needed, in parallel (the rest comes on demand)
@@ -239,7 +246,10 @@ async function start() {
     // TEXPRESSO_SHELL_ESCAPE=2: restricted shell escape; piped input runs
     // kpsewhich and texlua in the driver's Lua sandbox (live Lua for luabridge)
     const env = { TEXPRESSO_LSR: '/lsr.txt', XDG_CACHE_HOME: '/cache', TEXPRESSO_SHELL_ESCAPE: '2' };
-    const run = { out: '', sentErrors: null, formatSaved: false, failed: false, toEnd: false, passes: 0 };
+    const run = { out: '', sentErrors: null, formatSaved: false, failed: false, toEnd: false, passes: 0,
+                  // debug panel timings: start, per edit, per frame (tick), deep (to idle)
+                  tStart: t0, startParts: parts, tLap: () => tLap, tWork: t0, tEdit: 0, editTicks: 0,
+                  editTickMs: 0, fr: { n: 0, sum: 0, max: 0, t0: performance.now() } };
     run.kernel = new Kernel({ log: s => { if (/failed/.test(s)) { run.failed = true; log(s); } } });
     run.engine = await createEngine({ kernel: run.kernel, tl, preRun: [m => Object.assign(m.ENV, env)],
       print: () => {}, printErr: () => {} });
@@ -305,8 +315,22 @@ function step() {
   const t0 = performance.now();
   let more = true;
   try {
-    while (more && performance.now() - t0 < 30) more = !!run.drv._txp_wasm_tick();
+    while (more && performance.now() - t0 < 30) {
+      const a = performance.now();
+      more = !!run.drv._txp_wasm_tick();
+      const d = performance.now() - a;
+      run.fr.n++; run.fr.sum += d; if (d > run.fr.max) run.fr.max = d;
+      if (run.tEdit) { run.editTicks++; run.editTickMs += d; }
+    }
   } catch (e) { fail(e); return; }
+  // per second: the engine's ticks (debug panel)
+  const fnow = performance.now();
+  if (fnow - run.fr.t0 >= 1000) {
+    // (a second with almost no work, e.g. the last tick before idle: not shown)
+    if (run.fr.sum > 20) send({ type: 'timing', kind: 'frame', ticks: run.fr.n, avg: +(run.fr.sum / run.fr.n).toFixed(2),
+                         max: +run.fr.max.toFixed(1), busy: Math.round(run.fr.sum / (fnow - run.fr.t0) * 100) });
+    run.fr = { n: 0, sum: 0, max: 0, t0: fnow };
+  }
   if (run.failed) { fail(new Error('the engine stopped')); return; }
   // the format is complete once a page is out: keep it (once)
   if (!run.formatSaved && P.pages.size) {
@@ -333,6 +357,11 @@ function step() {
   const st = run.kernel.stats;
   if (tl) log(`TeX Live: ${tl.stats.downloads} packages downloaded (${Math.round(tl.stats.downloadBytes / 1048576)} MiB), ${tl.stats.fromCache} from the store`);
   log(`idle: forks ${st.forks}, restores ${st.restores}, snapshots ${Math.round(st.snapMs)} ms, restores ${Math.round(st.restoreMs)} ms, engine ${Math.round(st.runMs)} ms`);
+  if (run.tWork) {
+    // deep: from the edit (or the start) to the end of the document and its passes
+    send({ type: 'timing', kind: 'deep', ms: Math.round(performance.now() - run.tWork), passes: run.passes });
+    run.tWork = 0;
+  }
   if (P.lastMsg.status && P.lastMsg.status.busy) status('live', false);
 }
 
@@ -492,6 +521,17 @@ function onLine(run, line) {
   if ((m = line.match(pageRe))) {
     let data;
     try { data = run.drv.FS.readFile(m[4]); run.drv.FS.unlink(m[4]); } catch { return; }
+    const now = performance.now();
+    if (run.tStart) {
+      run.startParts.push(['first page', Math.round(now - run.tLap())]);
+      send({ type: 'timing', kind: 'start', ms: Math.round(now - run.tStart), parts: run.startParts });
+      run.tStart = 0;
+    }
+    if (run.tEdit) {
+      send({ type: 'timing', kind: 'edit', ms: Math.round(now - run.tEdit), page: +m[1],
+             ticks: run.editTicks, tickMs: Math.round(run.editTickMs) });
+      run.tEdit = 0;
+    }
     send({ type: 'page', page: +m[1], count: +m[2], done: m[3] === '1', png: toBase64(data),
       w: parseFloat(m[5] || '595.28'), h: parseFloat(m[6] || '841.89') });
   } else if ((m = line.match(caretRe))) {
@@ -512,6 +552,16 @@ function onLine(run, line) {
       sel: m[11] ? [+m[11], +m[12]] : null, shared: m[13] === '1',
       options: m[14] ? unescape(m[14]).split(',').filter(Boolean) : [],
       also: m[15] ? m[15].split(';').map(p => p.split(':').map(Number)) : [] });
+  } else if (line.startsWith('(timing page ')) {
+    // (timing page n list draw png map): ms for a page picture
+    const t = line.slice(1, -1).split(' ').map(Number);
+    send({ type: 'timing', kind: 'page', page: t[2], list: t[3], draw: t[4], png: t[5], map: t[6] });
+  } else if (line.startsWith('(page-fields ')) {
+    const t = line.slice(1, -1).split(' ');
+    const fields = [];
+    for (let i = 3; i + 4 < t.length + 1 && fields.length < +t[2]; i += 5)
+      fields.push({ kind: t[i], box: t.slice(i + 1, i + 5).map(Number) });
+    send({ type: 'pageFields', page: +t[1], fields });
   } else if (line.startsWith('(page-map ')) {
     // (page-map page "json"): text lines, characters and links of a page
     const m = line.match(/^\(page-map (\d+) "((?:[^"\\]|\\.)*)"\)$/);
@@ -675,7 +725,11 @@ const handlers = {
     if (!P.run) { await start(); }
     writeProjectFile(rel, P.files.get(rel));
     P.lastActivity = performance.now();
-    if (P.run) P.run.passes = 0;
+    if (P.run) {
+      P.run.passes = 0;
+      P.run.tWork = P.run.tEdit = performance.now();
+      P.run.editTicks = P.run.editTickMs = 0;
+    }
     command(`(open ${sexpString(rel)} ${sexpString(text)})`);
   },
   // a file from Overleaf's last compile: output.bbl (Biber, for biblatex)
@@ -724,6 +778,9 @@ const handlers = {
   // the text of pages that are not in view (find)
   pageMaps(client, msg) {
     if (P.run) command(`(page-map ${Math.max(0, msg.first | 0)} ${Math.max(0, msg.last | 0)})`);
+  },
+  pageFields(client, msg) {
+    if (P.run) command(`(page-fields ${Math.max(0, msg.page | 0)})`);
   },
   findDest(client, msg) {
     if (P.run && typeof msg.name === 'string') command(`(find-dest ${sexpString(msg.name)})`);

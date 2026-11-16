@@ -207,6 +207,9 @@ class Project:
         shutil.rmtree(self.export_dir, ignore_errors=True)
         self.export_dir.mkdir()
         env = dict(os.environ, SDL_VIDEODRIVER="offscreen")
+        # debug panel timings: start (to the first page), per edit, deep (to the end)
+        self.t_start = self.t_work = time.time()
+        self.t_edit = 0
         self.proc = await asyncio.create_subprocess_exec(
             TEXPRESSO, "-texlive", *self.include_dirs(), self.main, cwd=self.dir, env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -270,6 +273,26 @@ class Project:
                 await self.send({"type": "page", "page": page, "count": count,
                                  "done": done, "png": base64.b64encode(data).decode(),
                                  "w": float(m[5] or 595.28), "h": float(m[6] or 841.89)})
+                now = time.time()
+                if getattr(self, "t_start", 0):
+                    await self.send({"type": "timing", "kind": "start", "ms": round((now - self.t_start) * 1000),
+                                     "parts": [["TeXpresso started to first page", round((now - self.t_start) * 1000)]]})
+                    self.t_start = 0
+                if getattr(self, "t_edit", 0):
+                    await self.send({"type": "timing", "kind": "edit", "ms": round((now - self.t_edit) * 1000),
+                                     "page": page})
+                    self.t_edit = 0
+                continue
+            if line.startswith("(timing page "):
+                t = line[1:-1].split(" ")
+                await self.send({"type": "timing", "kind": "page", "page": int(t[2]), "list": float(t[3]),
+                                 "draw": float(t[4]), "png": float(t[5]), "map": float(t[6])})
+                continue
+            if line.startswith("(page-fields "):
+                t = line[1:-1].split(" ")
+                fields = [{"kind": t[i], "box": [float(v) for v in t[i + 1:i + 5]]}
+                          for i in range(3, len(t) - 4, 5)]
+                await self.send({"type": "pageFields", "page": int(t[1]), "fields": fields})
                 continue
             m = caret_re.match(line)
             if m:
@@ -348,6 +371,11 @@ class Project:
             m = count_re.match(line)
             if m:
                 await self.send({"type": "count", "count": int(m[1]), "done": m[2] == "1"})
+                if m[2] == "1" and getattr(self, "t_work", 0):
+                    # deep: from the edit (or the start) to the end of the document
+                    await self.send({"type": "timing", "kind": "deep",
+                                     "ms": round((time.time() - self.t_work) * 1000)})
+                    self.t_work = 0
                 continue
             m = append_re.match(line)
             if m:
@@ -447,6 +475,7 @@ class Project:
                 # TeXpresso's rescan sees changed files, not new ones
                 await self.start_texpresso()
             await self.status(f"Lua results updated ({time.time() - t0:.1f} s)", False)
+            await self.send({"type": "timing", "kind": "lua", "ms": round((time.time() - t0) * 1000)})
 
     # --- messages from the extension ---------------------------------
     async def join(self, ws, msg):
@@ -500,6 +529,7 @@ class Project:
         self.last_edit = time.time()
         if not self.proc or self.proc.returncode is not None:
             await self.start_texpresso()
+        self.t_edit = self.t_work = time.time()
         await self.command(f"(open {sexp_string(rel)} {sexp_string(text)})")
         self.schedule_lua()
 
@@ -557,6 +587,9 @@ class Project:
 
     async def on_page_maps(self, ws, msg):
         await self.command(f"(page-map {max(0, int(msg.get('first', 0)))} {max(0, int(msg.get('last', 0)))})")
+
+    async def on_page_fields(self, ws, msg):
+        await self.command(f"(page-fields {max(0, int(msg.get('page', 0)))})")
 
     async def on_find_dest(self, ws, msg):
         name = msg.get("name")
@@ -672,7 +705,7 @@ async def handler(ws, path=None):
                     "caretMap": project.on_caret_map,
                     "caretElements": project.on_caret_elements,
                     "probe": project.on_probe, "pageMaps": project.on_page_maps,
-                    "click": project.on_click,
+                    "click": project.on_click, "pageFields": project.on_page_fields,
                     "findDest": project.on_find_dest}.get(kind)
                 if handler_fn:
                     await handler_fn(ws, msg)
