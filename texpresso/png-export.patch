@@ -1,4 +1,4 @@
-From c3dafa8d9b830a54d4d56459ed22e78993beac53 Mon Sep 17 00:00:00 2001
+From 73846e0b4916b42e22f4b2a2d9e09d7c2cd643eb Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -6,22 +6,43 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  the glyphs, TikZ elements, quick edit fields, plot lines, module markers
 
 ---
+ src/dvi/dvi_context.c             |    5 +
  src/dvi/dvi_prim.c                |    4 +-
  src/dvi/dvi_resmanager.c          |   62 +-
- src/dvi/dvi_special.c             |   76 +-
- src/dvi/dvi_special.re2c.c        |   76 +-
- src/dvi/mydvi.h                   |    2 +
+ src/dvi/dvi_special.c             |  125 +-
+ src/dvi/dvi_special.re2c.c        |  125 +-
+ src/dvi/mydvi.h                   |    4 +
  src/engine/engine/xetex-synctex.c |   44 +-
  src/engine/engine/xetex-xetex0.c  |   25 +-
  src/engine/engine/xetex-xetexd.h  |   11 +
- src/frontend/editor.c             |  105 +-
- src/frontend/editor.h             |   34 +
+ src/frontend/editor.c             |  132 +-
+ src/frontend/editor.h             |   46 +
  src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 1331 +++++++++++++
- src/frontend/synctex.c            | 3042 ++++++++++++++++++++++++++++-
- src/frontend/synctex.h            |  153 ++
- 14 files changed, 5066 insertions(+), 61 deletions(-)
+ src/frontend/main.c               | 1851 +++++++++++++++++
+ src/frontend/synctex.c            | 3088 ++++++++++++++++++++++++++++-
+ src/frontend/synctex.h            |  154 ++
+ 15 files changed, 5777 insertions(+), 61 deletions(-)
 
+diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
+index 4045ab1..6c3ac9a 100644
+--- a/src/dvi/dvi_context.c
++++ b/src/dvi/dvi_context.c
+@@ -79,10 +79,15 @@ void dvi_context_begin_frame(fz_context *ctx, dvi_context *dc, fz_device *dev)
+   dc->colorstack.depth = 0;
+   for (int i = 0; i < dc->pdfcolorstacks.capacity; i++)
+     dc->pdfcolorstacks.stacks[i].depth = 0;
++  dc->olive_links = 0;
+ }
+ 
+ void dvi_context_end_frame(fz_context *ctx, dvi_context *dc)
+ {
++  // a link that goes on to the next page: its layer ends with this page
++  for (; dc->olive_links > 0; dc->olive_links--)
++    if (dc->dev)
++      fz_end_layer(ctx, dc->dev);
+   dvi_scratch_clear(ctx, &dc->scratch);
+   dvi_context_set_device(ctx, dc, NULL);
+ 
 diff --git a/src/dvi/dvi_prim.c b/src/dvi/dvi_prim.c
 index 92548a0..06c869e 100644
 --- a/src/dvi/dvi_prim.c
@@ -139,7 +160,7 @@ index f702dfa..df97614 100644
    fz_catch(ctx)
    {
 diff --git a/src/dvi/dvi_special.c b/src/dvi/dvi_special.c
-index 516e30d..42b538a 100644
+index 516e30d..a1e84ac 100644
 --- a/src/dvi/dvi_special.c
 +++ b/src/dvi/dvi_special.c
 @@ -1140,7 +1140,11 @@ embed_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, struct xform_spec *xf
@@ -271,7 +292,7 @@ index 516e30d..42b538a 100644
          case PDF_OP_v:
          case PDF_OP_y:
          case PDF_OP_BT:
-@@ -4442,6 +4468,30 @@ yy410:
+@@ -4442,6 +4468,79 @@ yy410:
  
  bool dvi_exec_special(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t lim)
  {
@@ -279,6 +300,55 @@ index 516e30d..42b538a 100644
 +     (see olive_hooks in frontend/main.c): "olive:b ..." starts an element
 +     (a path, a node, a to[...]), "olive:e ..." ends it. They become layers,
 +     which do not change the rendering; the caret device reads them. */
++  /* Overleaf Live: the links of hyperref (xdvipdfmx specials). "pdf:bann
++     <<dict>>" ... "pdf:eann" becomes a layer "olive-link <<dict>>" (the
++     text in it is the link); "pdf:dest (name) [...]" a layer
++     "olive-dest x y (name)" at the current point. They do not change the
++     rendering; the page map of the front-end reads them. */
++  {
++    const char *p = cur;
++    while (p < lim && (*p == ' ' || *p == '\t')) p++;
++    int n = (int)(lim - p);
++    if (n >= 8 && memcmp(p, "pdf:", 4) == 0)
++    {
++      const char *q = p + 4;
++      while (q < lim && *q == ' ') q++;
++      int m = (int)(lim - q);
++      if ((m >= 4 && memcmp(q, "bann", 4) == 0) || (m >= 4 && memcmp(q, "eann", 4) == 0) ||
++          (m >= 4 && memcmp(q, "dest", 4) == 0))
++      {
++        if (dc->dev)
++        {
++          char name[1024];
++          dvi_context_flush_text(ctx, dc, st);
++          if (q[0] == 'e')
++          {
++            if (dc->olive_links > 0)
++            {
++              dc->olive_links--;
++              fz_end_layer(ctx, dc->dev);
++            }
++          }
++          else if (q[0] == 'b')
++          {
++            int k = m - 4 < 1000 ? m - 4 : 1000;
++            snprintf(name, sizeof name, "olive-link %.*s", k, q + 4);
++            fz_begin_layer(ctx, dc->dev, name);
++            dc->olive_links++;
++          }
++          else
++          {
++            fz_matrix ctm = dvi_get_ctm(dc, st);
++            int k = m - 4 < 900 ? m - 4 : 900;
++            snprintf(name, sizeof name, "olive-dest %.2f %.2f %.*s", ctm.e, ctm.f, k, q + 4);
++            fz_begin_layer(ctx, dc->dev, name);
++            fz_end_layer(ctx, dc->dev);
++          }
++        }
++        return 1;
++      }
++    }
++  }
 +  if (lim - cur > 7 && memcmp(cur, "olive:", 6) == 0)
 +  {
 +    if (dc->dev)
@@ -303,7 +373,7 @@ index 516e30d..42b538a 100644
  
    // fprintf(stderr, "special: %.*s\n", (int)(lim - cur), cur);
 diff --git a/src/dvi/dvi_special.re2c.c b/src/dvi/dvi_special.re2c.c
-index f4878b6..b9b8859 100644
+index f4878b6..27ba3b3 100644
 --- a/src/dvi/dvi_special.re2c.c
 +++ b/src/dvi/dvi_special.re2c.c
 @@ -463,7 +463,11 @@ embed_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, struct xform_spec *xf
@@ -435,7 +505,7 @@ index f4878b6..b9b8859 100644
          case PDF_OP_v:
          case PDF_OP_y:
          case PDF_OP_BT:
-@@ -1211,6 +1237,30 @@ dvi_exec_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, curs
+@@ -1211,6 +1237,79 @@ dvi_exec_pdf(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, curs
  
  bool dvi_exec_special(fz_context *ctx, dvi_context *dc, dvi_state *st, cursor_t cur, cursor_t lim)
  {
@@ -443,6 +513,55 @@ index f4878b6..b9b8859 100644
 +     (see olive_hooks in frontend/main.c): "olive:b ..." starts an element
 +     (a path, a node, a to[...]), "olive:e ..." ends it. They become layers,
 +     which do not change the rendering; the caret device reads them. */
++  /* Overleaf Live: the links of hyperref (xdvipdfmx specials). "pdf:bann
++     <<dict>>" ... "pdf:eann" becomes a layer "olive-link <<dict>>" (the
++     text in it is the link); "pdf:dest (name) [...]" a layer
++     "olive-dest x y (name)" at the current point. They do not change the
++     rendering; the page map of the front-end reads them. */
++  {
++    const char *p = cur;
++    while (p < lim && (*p == ' ' || *p == '\t')) p++;
++    int n = (int)(lim - p);
++    if (n >= 8 && memcmp(p, "pdf:", 4) == 0)
++    {
++      const char *q = p + 4;
++      while (q < lim && *q == ' ') q++;
++      int m = (int)(lim - q);
++      if ((m >= 4 && memcmp(q, "bann", 4) == 0) || (m >= 4 && memcmp(q, "eann", 4) == 0) ||
++          (m >= 4 && memcmp(q, "dest", 4) == 0))
++      {
++        if (dc->dev)
++        {
++          char name[1024];
++          dvi_context_flush_text(ctx, dc, st);
++          if (q[0] == 'e')
++          {
++            if (dc->olive_links > 0)
++            {
++              dc->olive_links--;
++              fz_end_layer(ctx, dc->dev);
++            }
++          }
++          else if (q[0] == 'b')
++          {
++            int k = m - 4 < 1000 ? m - 4 : 1000;
++            snprintf(name, sizeof name, "olive-link %.*s", k, q + 4);
++            fz_begin_layer(ctx, dc->dev, name);
++            dc->olive_links++;
++          }
++          else
++          {
++            fz_matrix ctm = dvi_get_ctm(dc, st);
++            int k = m - 4 < 900 ? m - 4 : 900;
++            snprintf(name, sizeof name, "olive-dest %.2f %.2f %.*s", ctm.e, ctm.f, k, q + 4);
++            fz_begin_layer(ctx, dc->dev, name);
++            fz_end_layer(ctx, dc->dev);
++          }
++        }
++        return 1;
++      }
++    }
++  }
 +  if (lim - cur > 7 && memcmp(cur, "olive:", 6) == 0)
 +  {
 +    if (dc->dev)
@@ -467,7 +586,7 @@ index f4878b6..b9b8859 100644
  
    // fprintf(stderr, "special: %.*s\n", (int)(lim - cur), cur);
 diff --git a/src/dvi/mydvi.h b/src/dvi/mydvi.h
-index e2f2105..4a4eef6 100644
+index e2f2105..ee5c89f 100644
 --- a/src/dvi/mydvi.h
 +++ b/src/dvi/mydvi.h
 @@ -284,6 +284,8 @@ typedef struct
@@ -479,6 +598,15 @@ index e2f2105..4a4eef6 100644
    int h, v;
  } dvi_graphicstate;
  
+@@ -336,6 +338,8 @@ typedef struct
+   // Pdf color stacks (introduced by pdftex)
+   dvi_colorstacks pdfcolorstacks;
+   float scale;
++  // Overleaf Live: hyperref links open on this page (layers)
++  int olive_links;
+ } dvi_context;
+ 
+ #define DC_ALLOC(ctx, dc, type, count) ((type*)dvi_scratch_alloc(ctx, &(dc)->scratch, sizeof(type) * (count)))
 diff --git a/src/engine/engine/xetex-synctex.c b/src/engine/engine/xetex-synctex.c
 index d363ecf..d1443c8 100644
 --- a/src/engine/engine/xetex-synctex.c
@@ -653,7 +781,7 @@ index 183c218..ee3637a 100644
  #define GLUE_SPEC_stretch_order(p) mem[p].b16.s1 /* aka "type" of a node */
  #define GLUE_SPEC_shrink_order(p) mem[p].b16.s0 /* aka "subtype" of a node */
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
-index 6face98..33c5353 100644
+index 6face98..4eec3d8 100644
 --- a/src/frontend/editor.c
 +++ b/src/frontend/editor.c
 @@ -219,6 +219,50 @@ bool editor_parse(fz_context *ctx,
@@ -707,7 +835,7 @@ index 6face98..33c5353 100644
    else if (strcmp(verb, "rescan") == 0)
    {
      if (len != 1)
-@@ -252,23 +296,82 @@ bool editor_parse(fz_context *ctx,
+@@ -252,23 +296,109 @@ bool editor_parse(fz_context *ctx,
      *out = (struct editor_command){.tag = EDIT_STAY_ON_TOP,
                                     .stay_on_top = {.status = status}};
    }
@@ -771,9 +899,35 @@ index 6face98..33c5353 100644
              },
      };
    }
-+  else if (strcmp(verb, "synctex-scan") == 0)
++  else if (strcmp(verb, "page-map") == 0)
 +  {
-+    // (synctex-scan page x y): page from 0, x y in points from the top left
++    // (page-map first last): the text and links of the pages (find, copy)
++    if (len != 3)
++      goto arity;
++    val first = val_array_get(ctx, stack, command, 1);
++    val last = val_array_get(ctx, stack, command, 2);
++    if (!val_is_number(first) || !val_is_number(last))
++      goto arguments;
++    *out = (struct editor_command){.tag = EDIT_PAGE_MAP,
++                                   .page_map = {.first = val_number(ctx, first),
++                                                .last = val_number(ctx, last)}};
++  }
++  else if (strcmp(verb, "find-dest") == 0)
++  {
++    // (find-dest "name"): the page and point of a hyperref target
++    if (len != 2)
++      goto arity;
++    val name = val_array_get(ctx, stack, command, 1);
++    if (!val_is_string(name))
++      goto arguments;
++    *out = (struct editor_command){.tag = EDIT_FIND_DEST,
++                                   .find_dest = {.name = val_string(ctx, stack, name)}};
++  }
++  else if (strcmp(verb, "synctex-scan") == 0 || strcmp(verb, "synctex-probe") == 0 ||
++           strcmp(verb, "synctex-click") == 0)
++  {
++    // (synctex-scan page x y): page from 0, x y in points from the top left;
++    // (synctex-probe page x y): what a double-click there would do
 +    if (len != 4)
 +      goto arity;
 +    val page = val_array_get(ctx, stack, command, 1);
@@ -782,7 +936,8 @@ index 6face98..33c5353 100644
 +    if (!val_is_number(page) || !val_is_number(x) || !val_is_number(y))
 +      goto arguments;
 +    *out = (struct editor_command){
-+        .tag = EDIT_SYNCTEX_SCAN,
++        .tag = verb[8] == 'p' ? EDIT_SYNCTEX_PROBE :
++               verb[8] == 'c' ? EDIT_SYNCTEX_CLICK : EDIT_SYNCTEX_SCAN,
 +        .synctex_scan = {.page = val_number(ctx, page),
 +                         .x = val_number(ctx, x),
 +                         .y = val_number(ctx, y)},
@@ -792,7 +947,7 @@ index 6face98..33c5353 100644
    {
      if (len != 1)
 diff --git a/src/frontend/editor.h b/src/frontend/editor.h
-index 05fdd1c..0d9c676 100644
+index 05fdd1c..0a553aa 100644
 --- a/src/frontend/editor.h
 +++ b/src/frontend/editor.h
 @@ -28,6 +28,9 @@ enum EDITOR_COMMAND
@@ -805,7 +960,7 @@ index 05fdd1c..0d9c676 100644
    EDIT_MAP_WINDOW,
    EDIT_UNMAP_WINDOW,
    EDIT_CROP,
-@@ -37,6 +40,10 @@ enum EDITOR_COMMAND
+@@ -37,6 +40,14 @@ enum EDITOR_COMMAND
    EDIT_RESUME,
    EDIT_RERUN,
    EDIT_RERUN_ONCE,
@@ -813,10 +968,14 @@ index 05fdd1c..0d9c676 100644
 +  EDIT_GOTO_PAGE,
 +  EDIT_EXPORT_RANGE,
 +  EDIT_SYNCTEX_SCAN,
++  EDIT_SYNCTEX_PROBE,
++  EDIT_SYNCTEX_CLICK,
++  EDIT_PAGE_MAP,
++  EDIT_FIND_DEST,
  };
  
  struct editor_change
-@@ -105,8 +112,22 @@ struct editor_command
+@@ -105,8 +116,30 @@ struct editor_command
      struct {
        const char *path;
        int line;
@@ -826,6 +985,14 @@ index 05fdd1c..0d9c676 100644
 +    struct {
 +      bool status;
 +    } caret_debug;
++
++    struct {
++      int first, last;
++    } page_map;
++
++    struct {
++      const char *name;
++    } find_dest;
 +
 +    struct {
 +      int page;
@@ -839,7 +1006,7 @@ index 05fdd1c..0d9c676 100644
      struct {
        float x, y, w, h;
      } map_window;
-@@ -136,6 +157,19 @@ struct editor_command
+@@ -136,6 +169,19 @@ struct editor_command
  
      struct {
      } rerun_once;
@@ -1063,10 +1230,10 @@ index 5866b1b..4e2c078 100644
        break;
      }
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..6a4dcb2 100644
+index c202294..c51ca46 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1135 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1174 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1883,6 +2050,21 @@ index c202294..6a4dcb2 100644
 +   in it; shared: the field shows in several places, no edit box)
 +   (lines from 1, columns from 0; the box of the clicked glyph, in points),
 +   then the editor goes to its start. Returns 0 if there is no field. */
++/* probe: what a double-click at the point would do, without doing it (the
++   front-end's hover cursor): (probe page kind x0 y0 x1 y1), kind field
++   (an edit box), choice (a menu), text or none */
++static int probe_mode;
++static int probe_page;
++/* a single click: the editor cursor to the clicked character (no field, no
++   menu, no change) */
++static int click_mode;
++
++static void probe_print(const char *kind, float fs, synctex_box b)
++{
++  printf("(probe %d %s %.2f %.2f %.2f %.2f)\n", probe_page, kind, fs * b.x0, fs * b.y0,
++         fs * b.x1, fs * b.y1);
++}
++
 +static int field_click(struct persistent_state *ps, ui_state *ui, int page, int x, int y)
 +{
 +  int ng = 0, ne = 0, hit = -1;
@@ -1897,6 +2079,7 @@ index c202294..6a4dcb2 100644
 +    int k = synctex_element_at(els, ne, x, y);
 +    if (!(k >= 0 && els[k].kind == 'c') && hit >= 0)
 +      k = hit;
++    if (click_mode) k = -1;
 +    if (k >= 0 && els[k].kind == 'c' && !strncmp(els[k].action, "cell:", 5))
 +    {
 +      /* a choice (a K-map cell: 0, 1 or D): the values and their edits */
@@ -1907,7 +2090,12 @@ index c202294..6a4dcb2 100644
 +      int done = 0;
 +      if (caret_file(ps->ctx, ps->doc_path, name, (int)strlen(name), &file))
 +      {
-+        if (synctex_element_choice(&file, e, &ch))
++        if (probe_mode && synctex_element_choice(&file, e, &ch))
++        {
++          probe_print("choice", send(scale_factor, ui->eng), ch.box);
++          done = 1;
++        }
++        else if (synctex_element_choice(&file, e, &ch))
 +        {
 +          char full[2048];
 +          if (name[0] == '/') snprintf(full, sizeof full, "%s", name);
@@ -1954,7 +2142,12 @@ index c202294..6a4dcb2 100644
 +      int done = 0;
 +      if (caret_file(ps->ctx, ps->doc_path, name, (int)strlen(name), &file))
 +      {
-+        if (synctex_element_toggle(&file, e, &f))
++        if (probe_mode && synctex_element_toggle(&file, e, &f))
++        {
++          probe_print("choice", send(scale_factor, ui->eng), f.box);
++          done = 1;
++        }
++        else if (synctex_element_toggle(&file, e, &f))
 +        {
 +          char full[2048];
 +          if (name[0] == '/') snprintf(full, sizeof full, "%s", name);
@@ -2027,6 +2220,19 @@ index c202294..6a4dcb2 100644
 +  if (!ext || (strcmp(ext, ".tex") && strcmp(ext, ".sty") && strcmp(ext, ".cls") &&
 +               strcmp(ext, ".ltx")))
 +    return 0;
++  if (click_mode)
++  {
++    if (f.cl <= 0)
++      return 0;     /* not a character: the element (its start) */
++    editor_synctex(ps->doc_path, f.file, (int)strlen(f.file), f.cl, f.cc);
++    return 1;
++  }
++  if (probe_mode)
++  {
++    float fs = send(scale_factor, ui->eng);
++    probe_print(f.ok == 2 ? "text" : f.shared ? "none" : "field", fs, f.box);
++    return 1;
++  }
 +  if (f.ok == 2)
 +  {
 +    /* no field: the clicked character, exactly */
@@ -2202,10 +2408,458 @@ index c202294..6a4dcb2 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +2046,125 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2085,575 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
++/* Overleaf Live: the page map, for the front-end's hover cursor, links,
++   copy and find. (page-map page "json") with
++     {"w":W,"h":H,"lines":[[x0,y0,x1,y1,"text",[x of each char...,x end]],...],
++      "links":[[x0,y0,x1,y1,"url:..." or "dest:name"],...]}
++   in points from the top left of the page. Links come from the hyperref
++   specials (layers "olive-link <<dict>>", see dvi_special.c). */
++
++typedef struct {
++  fz_device super;
++  int depth;
++  int stack[64];             /* per open layer: its link, or -1 */
++  int nlinks, caplinks;
++  struct pm_link { char target[400]; int nrect; fz_rect rect[16]; } *links;
++  /* dests (find-dest): the one looked for */
++  const char *want;
++  int found;
++  fz_point at;
++  /* the text device of the page map: gets the text with its characters */
++  fz_device *fwd;
++} pm_device;
++
++/* The engine shows glyphs without their characters: per font, the
++   characters of its glyphs (first character of a glyph wins: ASCII before
++   math letters), from its character map */
++struct pm_rev { fz_font *font; int n; int *u; int nn; int *named; };
++static struct pm_rev *pm_revs;
++static int pm_nrevs;
++
++static int pm_unicode(fz_context *ctx, fz_font *font, int gid)
++{
++  if (!font || gid <= 0) return 0;
++  struct pm_rev *r = NULL;
++  for (int i = 0; i < pm_nrevs; i++)
++    if (pm_revs[i].font == font) { r = &pm_revs[i]; break; }
++  if (!r)
++  {
++    static const int ranges[][2] = {
++      {0x20, 0x24F}, {0x370, 0x3FF}, {0x2000, 0x206F}, {0x20A0, 0x20CF}, {0x2100, 0x23FF},
++      {0x25A0, 0x25FF}, {0x27E8, 0x27EF}, {0xFB00, 0xFB06}, {0x1D400, 0x1D7FF},
++    };
++    pm_revs = realloc(pm_revs, (pm_nrevs + 1) * sizeof(*pm_revs));
++    r = &pm_revs[pm_nrevs++];
++    r->font = fz_keep_font(ctx, font);
++    r->n = 0;
++    r->u = NULL;
++    r->nn = 0;
++    r->named = NULL;
++    for (unsigned k = 0; k < sizeof(ranges) / sizeof(ranges[0]); k++)
++      for (int u = ranges[k][0]; u <= ranges[k][1]; u++)
++      {
++        int g = fz_encode_character(ctx, font, u);
++        if (g <= 0) continue;
++        if (g >= r->n)
++        {
++          int n = g + 256;
++          r->u = realloc(r->u, n * sizeof(int));
++          for (int i = r->n; i < n; i++) r->u[i] = 0;
++          r->n = n;
++        }
++        if (!r->u[g]) r->u[g] = u;
++      }
++  }
++  /* a glyph name ("period", "Omega", "uni2126") first: TeX's own fonts
++     have their characters in other places (a math period at ':') */
++  if (gid >= r->nn)
++  {
++    int n = gid + 256;
++    r->named = realloc(r->named, n * sizeof(int));
++    for (int i = r->nn; i < n; i++) r->named[i] = 0;
++    r->nn = n;
++  }
++  if (!r->named[gid])
++  {
++    char name[64] = "";
++    fz_try(ctx)
++      fz_get_glyph_name(ctx, font, gid, name, sizeof name);
++    fz_catch(ctx)
++      name[0] = 0;
++    int u = name[0] ? fz_unicode_from_glyph_name(name) : 0;
++    r->named[gid] = u > 0 ? u : -1;
++  }
++  if (r->named[gid] > 0)
++    return r->named[gid];
++  return gid < r->n ? r->u[gid] : 0;
++}
++
++/* the string after key in dict: (..) with escapes, or /name */
++static int pm_string(const char *dict, const char *key, char *out, int cap)
++{
++  const char *p = dict;
++  size_t kl = strlen(key);
++  while ((p = strstr(p, key)))
++  {
++    const char *q = p + kl;
++    if (kl && ((q[0] >= 'a' && q[0] <= 'z') || (q[0] >= 'A' && q[0] <= 'Z'))) { p = q; continue; }
++    while (*q == ' ') q++;
++    int n = 0;
++    if (*q == '(')
++    {
++      int depth = 0;
++      for (q++; *q; q++)
++      {
++        if (*q == '\\' && q[1]) { q++; if (n < cap - 1) out[n++] = *q; continue; }
++        if (*q == '(') depth++;
++        if (*q == ')' && depth-- == 0) break;
++        if (n < cap - 1) out[n++] = *q;
++      }
++      out[n] = 0;
++      return 1;
++    }
++    if (*q == '/')
++    {
++      for (q++; *q && !strchr(" /<>[]()\t\n", *q); q++)
++        if (n < cap - 1) out[n++] = *q;
++      out[n] = 0;
++      return 1;
++    }
++    if (!kl) return 0;
++    p = q;
++  }
++  return 0;
++}
++
++static void pm_begin_layer(fz_context *ctx, fz_device *dev_, const char *name)
++{
++  (void)ctx;
++  pm_device *dev = (pm_device *)dev_;
++  int link = -1;
++  if (!strncmp(name, "olive-link ", 11))
++  {
++    char t[380];
++    char target[400] = "";
++    if (pm_string(name, "/URI", t, sizeof t)) snprintf(target, sizeof target, "url:%s", t);
++    else if (pm_string(name, "/D", t, sizeof t) || pm_string(name, "/Dest", t, sizeof t))
++      snprintf(target, sizeof target, "dest:%s", t);
++    if (target[0])
++    {
++      if (dev->nlinks == dev->caplinks)
++      {
++        dev->caplinks = dev->caplinks ? dev->caplinks * 2 : 16;
++        dev->links = fz_realloc(ctx, dev->links, dev->caplinks * sizeof(*dev->links));
++      }
++      link = dev->nlinks++;
++      snprintf(dev->links[link].target, sizeof dev->links[link].target, "%s", target);
++      dev->links[link].nrect = 0;
++    }
++  }
++  else if (!strncmp(name, "olive-dest ", 11) && dev->want && !dev->found)
++  {
++    float x, y;
++    int k = 0;
++    char t[400];
++    if (sscanf(name + 11, "%f %f %n", &x, &y, &k) == 2 && pm_string(name + 11 + k, "", t, sizeof t) &&
++        !strcmp(t, dev->want))
++    {
++      dev->found = 1;
++      dev->at = fz_make_point(x, y);
++    }
++  }
++  if (dev->depth < 64) dev->stack[dev->depth] = link;
++  dev->depth++;
++}
++
++static void pm_end_layer(fz_context *ctx, fz_device *dev_)
++{
++  (void)ctx;
++  pm_device *dev = (pm_device *)dev_;
++  if (dev->depth > 0) dev->depth--;
++}
++
++static void pm_add(pm_device *dev, fz_rect r)
++{
++  if (fz_is_empty_rect(r)) return;
++  int link = -1;
++  for (int k = (dev->depth < 64 ? dev->depth : 64) - 1; k >= 0 && link < 0; k--)
++    link = dev->stack[k];
++  if (link < 0) return;
++  struct pm_link *l = &dev->links[link];
++  /* the same line: one rect */
++  if (l->nrect > 0)
++  {
++    fz_rect *o = &l->rect[l->nrect - 1];
++    float ov = fz_min(o->y1, r.y1) - fz_max(o->y0, r.y0);
++    float hmin = fz_min(o->y1 - o->y0, r.y1 - r.y0);
++    if (ov > 0.5f * hmin && r.x0 < o->x1 + 12 && r.x1 > o->x0 - 12)
++    {
++      *o = fz_union_rect(*o, r);
++      return;
++    }
++  }
++  if (l->nrect < 16) l->rect[l->nrect++] = r;
++}
++
++static void pm_fill_text(fz_context *ctx, fz_device *dev_, const fz_text *text, fz_matrix ctm,
++                         fz_colorspace *cs, const float *color, float alpha, fz_color_params cp)
++{
++  pm_device *dev = (pm_device *)dev_;
++  pm_add(dev, fz_bound_text(ctx, text, NULL, ctm));
++  if (!dev->fwd) return;
++  /* the same text with the characters of its glyphs */
++  fz_text *t = fz_new_text(ctx);
++  fz_try(ctx)
++  {
++    for (fz_text_span *sp = text->head; sp; sp = sp->next)
++      for (int i = 0; i < sp->len; i++)
++      {
++        fz_text_item *it = &sp->items[i];
++        fz_matrix trm = sp->trm;
++        trm.e = it->x;
++        trm.f = it->y;
++        /* the engine's character is not always right (xdv glyphs): the
++           font's own first */
++        int u = pm_unicode(ctx, sp->font, it->gid);
++        if (u <= 0) u = it->ucs;
++        fz_show_glyph(ctx, t, sp->font, trm, it->gid, u > 0 ? u : 0xFFFD, sp->wmode,
++                      sp->bidi_level, sp->markup_dir, sp->language);
++      }
++    fz_fill_text(ctx, dev->fwd, t, ctm, cs, color, alpha, cp);
++  }
++  fz_always(ctx)
++    fz_drop_text(ctx, t);
++  fz_catch(ctx)
++    fz_rethrow(ctx);
++}
++
++static void pm_fill_path(fz_context *ctx, fz_device *dev, const fz_path *path, int even_odd,
++                         fz_matrix ctm, fz_colorspace *cs, const float *color, float alpha,
++                         fz_color_params cp)
++{
++  (void)even_odd; (void)cs; (void)color; (void)alpha; (void)cp;
++  pm_add((pm_device *)dev, fz_bound_path(ctx, path, NULL, ctm));
++}
++
++static void pm_fill_image(fz_context *ctx, fz_device *dev, fz_image *img, fz_matrix ctm,
++                          float alpha, fz_color_params cp)
++{
++  (void)ctx; (void)img; (void)alpha; (void)cp;
++  pm_add((pm_device *)dev, fz_transform_rect(fz_unit_rect, ctm));
++}
++
++static pm_device *pm_new(fz_context *ctx)
++{
++  pm_device *dev = fz_new_derived_device(ctx, pm_device);
++  dev->super.begin_layer = pm_begin_layer;
++  dev->super.end_layer = pm_end_layer;
++  dev->super.fill_text = pm_fill_text;
++  dev->super.fill_path = pm_fill_path;
++  dev->super.fill_image = pm_fill_image;
++  return dev;
++}
++
++static void pm_json_string(fz_context *ctx, fz_buffer *b, const char *s)
++{
++  fz_append_byte(ctx, b, '"');
++  for (; *s; s++)
++  {
++    unsigned char c = *s;
++    if (c == '"' || c == '\\') { fz_append_byte(ctx, b, '\\'); fz_append_byte(ctx, b, c); }
++    else if (c < 0x20) fz_append_printf(ctx, b, "\\u%04x", c);
++    else fz_append_byte(ctx, b, c);
++  }
++  fz_append_byte(ctx, b, '"');
++}
++
++static void page_map(fz_context *ctx, ui_state *ui, int page)
++{
++  fz_display_list *dl = send(render_page, ui->eng, ctx, page);
++  if (!dl)
++    return;
++  fz_stext_page *st = NULL;
++  pm_device *dev = NULL;
++  fz_device *sdev = NULL;
++  fz_buffer *b = NULL;
++  fz_var(sdev);
++  fz_var(st);
++  fz_var(dev);
++  fz_var(b);
++  fz_try(ctx)
++  {
++    fz_rect bounds = fz_bound_display_list(ctx, dl);
++    float ox = bounds.x0, oy = bounds.y0;
++    fz_stext_options opts = {0};
++    st = fz_new_stext_page(ctx, bounds);
++    sdev = fz_new_stext_device(ctx, st, &opts);
++    dev = pm_new(ctx);
++    dev->fwd = sdev;
++    fz_run_display_list(ctx, dl, &dev->super, fz_identity, fz_infinite_rect, NULL);
++    fz_close_device(ctx, &dev->super);
++    fz_close_device(ctx, sdev);
++    b = fz_new_buffer(ctx, 4096);
++    fz_append_printf(ctx, b, "{\"w\":%.2f,\"h\":%.2f,\"lines\":[", bounds.x1 - bounds.x0,
++                     bounds.y1 - bounds.y0);
++    int first = 1;
++    for (fz_stext_block *bl = st->first_block; bl; bl = bl->next)
++    {
++      if (bl->type != FZ_STEXT_BLOCK_TEXT) continue;
++      for (fz_stext_line *ln = bl->u.t.first_line; ln; ln = ln->next)
++      {
++        if (!ln->first_char || ln->wmode) continue;
++        fz_append_printf(ctx, b, "%s[%.1f,%.1f,%.1f,%.1f,", first ? "" : ",",
++                         ln->bbox.x0 - ox, ln->bbox.y0 - oy, ln->bbox.x1 - ox, ln->bbox.y1 - oy);
++        first = 0;
++        fz_buffer *t = fz_new_buffer(ctx, 128);
++        for (fz_stext_char *ch = ln->first_char; ch; ch = ch->next)
++          fz_append_rune(ctx, t, ch->c);
++        fz_terminate_buffer(ctx, t);
++        pm_json_string(ctx, b, fz_string_from_buffer(ctx, t));
++        fz_drop_buffer(ctx, t);
++        fz_append_string(ctx, b, ",[");
++        float last = 0;
++        for (fz_stext_char *ch = ln->first_char; ch; ch = ch->next)
++        {
++          fz_rect q = fz_rect_from_quad(ch->quad);
++          fz_append_printf(ctx, b, "%s%.1f", ch == ln->first_char ? "" : ",", q.x0 - ox);
++          last = q.x1 - ox;
++        }
++        fz_append_printf(ctx, b, ",%.1f]]", last);
++      }
++    }
++    fz_append_string(ctx, b, "],\"links\":[");
++    first = 1;
++    for (int i = 0; i < dev->nlinks; i++)
++      for (int k = 0; k < dev->links[i].nrect; k++)
++      {
++        fz_rect r = dev->links[i].rect[k];
++        fz_append_printf(ctx, b, "%s[%.1f,%.1f,%.1f,%.1f,", first ? "" : ",", r.x0 - ox, r.y0 - oy,
++                         r.x1 - ox, r.y1 - oy);
++        pm_json_string(ctx, b, dev->links[i].target);
++        fz_append_byte(ctx, b, ']');
++        first = 0;
++      }
++    fz_append_string(ctx, b, "]}");
++    fz_terminate_buffer(ctx, b);
++    printf("(page-map %d ", page);
++    print_sexp_string(fz_string_from_buffer(ctx, b));
++    printf(")\n");
++  }
++  fz_always(ctx)
++  {
++    if (dev) { fz_free(ctx, dev->links); fz_drop_device(ctx, &dev->super); }
++    fz_drop_device(ctx, sdev);
++    fz_drop_stext_page(ctx, st);
++    fz_drop_buffer(ctx, b);
++    fz_drop_display_list(ctx, dl);
++  }
++  fz_catch(ctx)
++  {
++    fprintf(stderr, "[page-map] page %d: %s\n", page, fz_caught_message(ctx));
++  }
++}
++
++/* (find-dest "name"): the page and the point of a hyperref target, for a
++   link in the front-end: (dest "name" page x y), page -1 if none. A target
++   on a page that is not typeset yet: the engine goes on (the front-end
++   shows only some pages) and looks at each new page (dest_progress). */
++static char dest_pending[400];
++static int dest_next;
++
++static void dest_reply(const char *name, int page, float x, float y)
++{
++  printf("(dest ");
++  print_sexp_string(name);
++  printf(" %d %.2f %.2f)\n", page, x, y);
++  fflush(stdout);
++}
++
++/* the dest on pages [from, to): 1 if found (and reported) */
++static int find_dest_in(fz_context *ctx, ui_state *ui, const char *name, int from, int to)
++{
++  for (int page = from; page < to; page++)
++  {
++    fz_display_list *dl = send(render_page, ui->eng, ctx, page);
++    if (!dl) continue;
++    pm_device *dev = NULL;
++    int found = 0;
++    fz_point at = {0, 0};
++    fz_rect bounds = fz_empty_rect;
++    fz_var(dev);
++    fz_try(ctx)
++    {
++      bounds = fz_bound_display_list(ctx, dl);
++      dev = pm_new(ctx);
++      dev->want = name;
++      fz_run_display_list(ctx, dl, &dev->super, fz_identity, fz_infinite_rect, NULL);
++      fz_close_device(ctx, &dev->super);
++      found = dev->found;
++      at = dev->at;
++    }
++    fz_always(ctx)
++    {
++      if (dev) { fz_free(ctx, dev->links); fz_drop_device(ctx, &dev->super); }
++      fz_drop_display_list(ctx, dl);
++    }
++    fz_catch(ctx)
++      fprintf(stderr, "[find-dest] page %d: %s\n", page, fz_caught_message(ctx));
++    if (found)
++    {
++      dest_reply(name, page, at.x - bounds.x0, at.y - bounds.y0);
++      return 1;
++    }
++  }
++  return 0;
++}
++
++static int export_last;
++
++static void find_dest(fz_context *ctx, ui_state *ui, const char *name)
++{
++  int count = send(page_count, ui->eng);
++  dest_pending[0] = 0;
++  if (find_dest_in(ctx, ui, name, 0, count))
++    return;
++  if (send(get_status, ui->eng) == DOC_TERMINATED)
++  {
++    dest_reply(name, -1, 0, 0);
++    return;
++  }
++  snprintf(dest_pending, sizeof dest_pending, "%s", name);
++  dest_next = count > 0 ? count - 1 : 0;   /* the last page was not finished */
++  ui->page = 1 << 20;                       /* the engine goes on */
++}
++
++/* after the engine has run: the pending dest on the new pages */
++static void dest_progress(fz_context *ctx, ui_state *ui)
++{
++  if (!dest_pending[0])
++    return;
++  int count = send(page_count, ui->eng);
++  int done = send(get_status, ui->eng) == DOC_TERMINATED;
++  int to = done ? count : count - 1;       /* finished pages only */
++  if (to > dest_next)
++  {
++    if (find_dest_in(ctx, ui, dest_pending, dest_next, to))
++    {
++      dest_pending[0] = 0;
++      ui->page = export_last;
++      return;
++    }
++    dest_next = to;
++  }
++  if (done)
++  {
++    dest_reply(dest_pending, -1, 0, 0);
++    dest_pending[0] = 0;
++    ui->page = export_last;
++  }
++}
++
 +/* PNG export, for front-ends that draw the pages themselves.
 +   (export-png dir width) turns it on; (export-range first last) says which
 +   pages are visible. The engine then runs up to the last of them, and each
@@ -2216,7 +2870,8 @@ index c202294..6a4dcb2 100644
 +   (page-count n terminated) reports the number of pages when it changes. */
 +static char export_dir[1024];
 +static int export_width = 0, export_seq = 0;
-+static int export_first = 0, export_last = 0;
++static int export_first = 0;
++static int export_last = 0;
 +static uint64_t *export_hash = NULL;     // per page: hash of the last picture
 +static int export_hash_len = 0;
 +static int export_reported_count = -1, export_reported_done = -1;
@@ -2294,6 +2949,7 @@ index c202294..6a4dcb2 100644
 +    // the page size in points (the front-end needs it for zoom levels)
 +    printf("(page-image %d %d %d \"%s\" %.2f %.2f)\n", page, count, done, path,
 +           bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
++    page_map(ctx, ui, page);
 +  }
 +  fz_always(ctx)
 +  {
@@ -2328,7 +2984,7 @@ index c202294..6a4dcb2 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +2317,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +2806,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -2348,7 +3004,7 @@ index c202294..6a4dcb2 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +2345,37 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +2834,65 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -2361,8 +3017,35 @@ index c202294..6a4dcb2 100644
      }
      break;
  
++    case EDIT_SYNCTEX_PROBE:
++    {
++      fz_buffer *buf;
++      synctex_t *stx = send(synctex, ui->eng, &buf);
++      float f = 1 / send(scale_factor, ui->eng);
++      probe_mode = 1;
++      probe_page = cmd.synctex_scan.page;
++      if (!stx || !buf ||
++          !field_click(ps, ui, cmd.synctex_scan.page, f * cmd.synctex_scan.x, f * cmd.synctex_scan.y))
++        printf("(probe %d none 0 0 0 0)\n", cmd.synctex_scan.page);
++      probe_mode = 0;
++      fflush(stdout);
++    }
++    break;
++
++    case EDIT_PAGE_MAP:
++      for (int p = cmd.page_map.first; p <= cmd.page_map.last && p < send(page_count, ui->eng); p++)
++        page_map(ps->ctx, ui, p);
++      fflush(stdout);
++      break;
++
++    case EDIT_FIND_DEST:
++      find_dest(ps->ctx, ui, cmd.find_dest.name);
++      break;
++
++    case EDIT_SYNCTEX_CLICK:
 +    case EDIT_SYNCTEX_SCAN:
 +    {
++      click_mode = cmd.tag == EDIT_SYNCTEX_CLICK;
 +      /* Overleaf Live: reverse search from a point given in points */
 +      fz_buffer *buf;
 +      synctex_t *stx = send(synctex, ui->eng, &buf);
@@ -2380,13 +3063,14 @@ index c202294..6a4dcb2 100644
 +                       cmd.synctex_scan.page, sx, sy);
 +        fflush(stdout);
 +      }
++      click_mode = 0;
 +    }
 +    break;
 +
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +2421,33 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +2938,35 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -2415,12 +3099,14 @@ index c202294..6a4dcb2 100644
 +      export_first = cmd.export_range.first < 0 ? 0 : cmd.export_range.first;
 +      export_last = cmd.export_range.last < export_first ? export_first : cmd.export_range.last;
 +      ui->page = export_last;          // the engine runs up to this page
++      if (dest_pending[0])
++        ui->page = 1 << 20;            // (or on, for a link target)
 +      schedule_event(RELOAD_EVENT);
 +      break;
    }
  }
  
-@@ -1234,9 +2548,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3067,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -2433,7 +3119,12 @@ index c202294..6a4dcb2 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1353,6 +2670,14 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3185,19 @@ bool texpresso_main(struct persistent_state *ps)
+       bool advance = !ps->paused && advance_engine(ps->ctx, ui);
+       send(finish_convergence, ui->eng, ps->ctx);
+       int after_page_count = send(page_count, ui->eng);
++      dest_progress(ps->ctx, ui);
+       fflush(stdout);
  
        if (ui->page >= before_page_count && ui->page < after_page_count)
          schedule_event(RELOAD_EVENT);
@@ -2448,7 +3139,7 @@ index c202294..6a4dcb2 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +2730,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3250,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -2460,7 +3151,7 @@ index c202294..6a4dcb2 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +3010,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +3530,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
@@ -2469,7 +3160,7 @@ index c202294..6a4dcb2 100644
  
          case STDIN_EVENT:
 diff --git a/src/frontend/synctex.c b/src/frontend/synctex.c
-index 3f0b8f5..ee3dec4 100644
+index 3f0b8f5..0d3c7f4 100644
 --- a/src/frontend/synctex.c
 +++ b/src/frontend/synctex.c
 @@ -23,6 +23,7 @@
@@ -2613,7 +3304,7 @@ index 3f0b8f5..ee3dec4 100644
      if (page) *page = stx->candidate_page;
      if (x) *x = stx->candidate_x;
      if (y) *y = stx->candidate_y;
-@@ -914,3 +1004,2953 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
+@@ -914,3 +1004,2999 @@ int synctex_find_target(fz_context *ctx, synctex_t *stx, fz_buffer *buf, int *pa
  
    return updated_candidate;
  }
@@ -5272,6 +5963,12 @@ index 3f0b8f5..ee3dec4 100644
 +  int gx = (cg->x0 + cg->x1) / 2, gy = cg->y;
 +  synctex_file f;
 +  int p = -1;
++  /* the box of the field on the page: the glyphs of a label, or the carets
++     of the field's characters (normal text) */
++  int lbox_set = 0;
++  synctex_box lbox = {0, 0, 0, 0};
++  const synctex_debug_point *tpts = NULL;
++  int tnp = 0;
 +  /* in a TikZ element? */
 +  int ek = synctex_element_at(els, ne, gx, gy);
 +  if (ek >= 0)
@@ -5399,6 +6096,21 @@ index 3f0b8f5..ee3dec4 100644
 +                for (int q = 0; q < best_m; q++) if (s0 + best_pos[q] == k) hit = 1;
 +                if (!hit) p = -1;
 +              }
++            if (p >= 0)
++              for (int j = 0; j < n; j++)
++              {
++                const synctex_glyph *g = &glyphs[gs[j]];
++                synctex_box gb = {g->x0, g->y0 < g->y1 ? g->y0 : g->y - 7 * 65536,
++                                  g->x1, g->y0 < g->y1 ? g->y1 : g->y + 2 * 65536};
++                if (!lbox_set) { lbox = gb; lbox_set = 1; }
++                else
++                {
++                  if (gb.x0 < lbox.x0) lbox.x0 = gb.x0;
++                  if (gb.y0 < lbox.y0) lbox.y0 = gb.y0;
++                  if (gb.x1 > lbox.x1) lbox.x1 = gb.x1;
++                  if (gb.y1 > lbox.y1) lbox.y1 = gb.y1;
++                }
++              }
 +          }
 +        }
 +      }
@@ -5484,6 +6196,8 @@ index 3f0b8f5..ee3dec4 100644
 +    for (int l = line - 1; l <= line + 1; l++)
 +      if (l + off >= 1 && l + off <= f.nlines) lines[k++] = l;
 +    synctex_caret_map(ctx, stx, buf, page, glyphs, ng, tag, &f, lines, k, off, &info);
++    tpts = pts;
++    tnp = info.npts;
 +    int best = -1;
 +    double bd = 0;
 +    for (int i = 0; i < info.npts; i++)
@@ -5541,10 +6255,12 @@ index 3f0b8f5..ee3dec4 100644
 +    /* no field: the place of the clicked character, for the editor */
 +    el_pos(&f, p, &out->l0, &out->c0);
 +    out->l1 = out->l0; out->c1 = out->c0;
++    out->cl = out->l0; out->cc = out->c0;
 +    out->ok = 2;
 +    unload(env, &f);
 +    return 2;
 +  }
++  el_pos(&f, p, &out->cl, &out->cc);
 +  /* the edit: the whole short command call, the field selected in it */
 +  field_call(f.text, f.len, a, b, &ca, &cb);
 +  el_pos(&f, ca, &out->l0, &out->c0);
@@ -5563,12 +6279,33 @@ index 3f0b8f5..ee3dec4 100644
 +  out->text[tl] = 0;
 +  out->box = (synctex_box){cg->x0, cg->y0 < cg->y1 ? cg->y0 : cg->y - 7 * 65536,
 +                           cg->x1, cg->y0 < cg->y1 ? cg->y1 : cg->y + 2 * 65536};
++  if (lbox_set)
++    out->box = lbox;
++  else if (tpts)
++  {
++    /* the carets from the field's first character to after its last one,
++       on the line of the clicked glyph */
++    synctex_box tb = out->box;
++    for (int i = 0; i < tnp; i++)
++    {
++      int q = f.line_off[tpts[i].line - 1] + tpts[i].col;
++      if (q < a || q > b || abs(tpts[i].y - cg->y) > 30 * 65536) continue;
++      if (tpts[i].x < tb.x0) tb.x0 = tpts[i].x;
++      if (tpts[i].x > tb.x1) tb.x1 = tpts[i].x;
++      if (tpts[i].h + tpts[i].d > 0)
++      {
++        if (tpts[i].y - tpts[i].h < tb.y0) tb.y0 = tpts[i].y - tpts[i].h;
++        if (tpts[i].y + tpts[i].d > tb.y1) tb.y1 = tpts[i].y + tpts[i].d;
++      }
++    }
++    out->box = tb;
++  }
 +  out->ok = 1;
 +  unload(env, &f);
 +  return 1;
 +}
 diff --git a/src/frontend/synctex.h b/src/frontend/synctex.h
-index cfff199..11550dd 100644
+index cfff199..92a29a8 100644
 --- a/src/frontend/synctex.h
 +++ b/src/frontend/synctex.h
 @@ -27,6 +27,7 @@
@@ -5579,7 +6316,7 @@ index cfff199..11550dd 100644
  
  typedef struct synctex_s synctex_t;
  
-@@ -42,6 +43,158 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
+@@ -42,6 +43,159 @@ void synctex_scan(fz_context *ctx, synctex_t *stx, fz_buffer *buf, const char *d
  
  int synctex_has_target(synctex_t *stx);
  void synctex_set_target(synctex_t *stx, int current_page, const char *path, int line);
@@ -5692,6 +6429,7 @@ index cfff199..11550dd 100644
 +   document). */
 +typedef struct {
 +  int ok;                      /* 1: a field; 2: no field, only the place l0, c0 */
++  int cl, cc;                  /* the clicked character (line, column), 0 if not known */
 +  int l0, c0, l1, c1;      /* the source text to edit, lines from 1, columns from 0 */
 +  int sel0, sel1;          /* the field in it (characters from its start): selected */
 +  int shared;              /* the field shows in several places (e.g. one value

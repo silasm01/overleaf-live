@@ -48,6 +48,8 @@
   ui.innerHTML = `
     <div class="olive-pane" hidden>
       <div class="olive-scroll" tabindex="0"><div class="olive-pages"></div></div>
+      <div class="olive-progress"></div>
+      <div class="olive-errors" hidden></div>
     </div>
     <div class="olive-pill">
       <div class="olive-menu" hidden>
@@ -103,6 +105,66 @@
   function setStatus(text, busy) {
     status = { text, busy: !!busy };
     showStatus();
+    showProgress();
+  }
+
+  // --- progress and errors in the viewer ----------------------------------
+  // A thin bar at the top while the engine works (after an edit until the
+  // pages in view are new, or while the status says busy); a short green
+  // bar when it is done without errors.
+  let working = false, workTimer = null;
+  function showProgress() {
+    const bar = $(".olive-progress");
+    const on = settings.on && connected && (working || status.busy);
+    if (on) { bar.className = "olive-progress olive-progress-on"; return; }
+    if (bar.classList.contains("olive-progress-on")) {
+      bar.className = "olive-progress" + (errors.length ? "" : " olive-progress-done");
+      setTimeout(() => bar.classList.remove("olive-progress-done"), 700);
+    }
+  }
+  function startWork() {
+    working = true;
+    clearTimeout(workTimer);
+    workTimer = setTimeout(endWork, 4000);    // no new page: nothing changed in view
+    showProgress();
+  }
+  function endWork() {
+    clearTimeout(workTimer);
+    if (!working) return;
+    working = false;
+    showProgress();
+  }
+
+  // the errors: a list at the top of the viewer; a click goes to the line
+  function showErrors(items) {
+    const box = $(".olive-errors");
+    box.textContent = "";
+    box.hidden = !settings.on || !items.length;
+    if (box.hidden) return;
+    const head = document.createElement("div");
+    head.className = "olive-errors-head";
+    head.textContent = `${items.length} error${items.length > 1 ? "s" : ""}`;
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.textContent = box.classList.contains("olive-errors-folded") ? "show" : "hide";
+    toggle.addEventListener("click", () => {
+      box.classList.toggle("olive-errors-folded");
+      toggle.textContent = box.classList.contains("olive-errors-folded") ? "show" : "hide";
+    });
+    head.appendChild(toggle);
+    box.appendChild(head);
+    for (const it of items) {
+      const row = document.createElement("div");
+      row.className = "olive-error";
+      const where = it.file ? `${it.file}${it.line ? ":" + it.line : ""}` : it.line ? `line ${it.line}` : "";
+      row.textContent = (where ? where + "  " : "") + it.text;
+      if (it.file && it.line) {
+        row.classList.add("olive-error-link");
+        row.title = "Go to the line";
+        row.addEventListener("click", () => gotoSource({ path: it.file, line: it.line, column: 0 }));
+      }
+      box.appendChild(row);
+    }
   }
 
   $(".olive-toggle").addEventListener("click", () => {
@@ -135,6 +197,36 @@
     slot.className = "olive-slot";
     slot.appendChild(document.createElement("img"));
     return slot;
+  }
+
+  // a new picture of a page: shown when it is decoded (no blank frame);
+  // a newer picture wins over an older one that decodes later
+  function showImage(slot, src) {
+    const gen = (+slot.dataset.gen || 0) + 1;
+    slot.dataset.gen = gen;
+    const img = new Image();
+    img.src = src;
+    img.decode().catch(() => {}).then(() => {
+      if (+slot.dataset.gen !== gen) return;
+      const old = slot.querySelector("img");
+      if (old) slot.replaceChild(img, old);
+      else slot.prepend(img);
+    });
+  }
+
+  // a change of sizes keeps the page in view where it is
+  function keepScroll(fn) {
+    const box = scroller.getBoundingClientRect();
+    let anchor = null, top = 0;
+    for (const s of slots()) {
+      const r = s.getBoundingClientRect();
+      if (r.bottom > box.top) { anchor = s; top = r.top; break; }
+    }
+    fn();
+    if (anchor && anchor.isConnected) {
+      const d = anchor.getBoundingClientRect().top - top;
+      if (Math.abs(d) > 0.5) scroller.scrollTop += d;
+    }
   }
 
   function setSlotCount(n) {
@@ -370,12 +462,43 @@
     checkView();
   }
 
-  // Ctrl + wheel and Overleaf's keyboard shortcuts, on the live pages
+  // Ctrl + wheel and pinch (a trackpad sends Ctrl + wheel): smooth zoom
+  // around the mouse (the point under it stays under it); one zoom per frame
+  let wheelZoom = null;
   scroller.addEventListener("wheel", (e) => {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    setZoom("scale", scale() * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    const factor = Math.exp(-Math.max(-60, Math.min(60, dy)) * 0.0035);
+    if (!wheelZoom) {
+      // the slot under the mouse and the point in it (fractions)
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const slot = el && el.closest && el.closest(".olive-slot");
+      let fx = 0.5, fy = 0.5;
+      if (slot) {
+        const r = slot.getBoundingClientRect();
+        fx = (e.clientX - r.left) / r.width;
+        fy = (e.clientY - r.top) / r.height;
+      }
+      wheelZoom = { factor: 1, slot, fx, fy, x: e.clientX, y: e.clientY };
+      requestAnimationFrame(() => {
+        const z = wheelZoom;
+        wheelZoom = null;
+        settings.zoom = { mode: "scale", scale: Math.min(9.99, Math.max(0.1, scale() * z.factor)) };
+        applyZoom();
+        if (z.slot && z.slot.isConnected) {
+          const r = z.slot.getBoundingClientRect();
+          scroller.scrollLeft += r.left + z.fx * r.width - z.x;
+          scroller.scrollTop += r.top + z.fy * r.height - z.y;
+        }
+        checkView();
+        clearTimeout(zoomSaveTimer);
+        zoomSaveTimer = setTimeout(save, 500);
+      });
+    }
+    wheelZoom.factor *= factor;
   }, { passive: false });
+  let zoomSaveTimer = null;
   scroller.addEventListener("keydown", (e) => {
     if (!(e.ctrlKey || e.metaKey)) return;
     const action = { "+": "zoom-in", "=": "zoom-in", "-": "zoom-out", "0": "page-width", "9": "page-height" }[e.key];
@@ -548,6 +671,424 @@
   attach();
   new ResizeObserver(() => { applyZoom(); checkView(); }).observe(scroller);
 
+  // --- hover, clicks, links, selection, find ------------------------------
+  // The engine sends a map of each page it shows (pageMap): its text lines
+  // with the position of each character, and its links. With it the viewer
+  // sets the mouse cursor (text, link), follows links, selects and copies
+  // text, and finds text. What a double-click would edit comes from the
+  // engine (probe), asked when the mouse stops; the answer is kept for its
+  // box until the page changes.
+  const pageMaps = new Map();       // page -> {w, h, lines: [[x0,y0,x1,y1,text,[x...]]], links}
+  const editable = new Map();       // page -> [{box, kind}] (from probes)
+  const hoverBox = document.createElement("div");
+  hoverBox.className = "olive-hover-box";
+  let hoverPt = null, probeTimer = null, probeBusy = false, probeNext = null, lastProbe = null;
+
+  // the page and the point (in points) of a mouse event, or null
+  function pointOf(e) {
+    const slot = e.target.closest && e.target.closest(".olive-slot");
+    if (!slot || !pages.contains(slot)) return null;
+    const page = Array.prototype.indexOf.call(slots(), slot);
+    const r = slot.getBoundingClientRect();
+    const w = +slot.dataset.w || pageSize.w, h = +slot.dataset.h || pageSize.h;
+    return { slot, page, x: (e.clientX - r.left) / r.width * w, y: (e.clientY - r.top) / r.height * h };
+  }
+
+  const inBox = (b, x, y, m = 0) => x >= b[0] - m && x <= b[2] + m && y >= b[1] - m && y <= b[3] + m;
+
+  function linkAt(pt) {
+    const map = pageMaps.get(pt.page);
+    return map && map.links.find((l) => inBox(l, pt.x, pt.y, 1));
+  }
+
+  function lineAt(pt) {
+    const map = pageMaps.get(pt.page);
+    if (!map) return -1;
+    return map.lines.findIndex((l) => inBox(l, pt.x, pt.y, 1));
+  }
+
+  function editableAt(pt) {
+    const list = editable.get(pt.page);
+    return list && list.find((e) => inBox(e.box, pt.x, pt.y, 0.5));
+  }
+
+  // the cursor and the outline for the point under the mouse
+  function hover(pt) {
+    hoverPt = pt;
+    if (!pt) { hoverBox.remove(); return; }
+    const link = linkAt(pt), ed = !link && editableAt(pt);
+    let cursor = "default";
+    if (link) cursor = "pointer";
+    else if (ed) cursor = "grab";
+    else if (lineAt(pt) >= 0) cursor = "text";
+    if (pt.slot.style.cursor !== cursor) pt.slot.style.cursor = cursor;
+    pt.slot.title = link ? (link[4].startsWith("url:") ? link[4].slice(4) : "Go to " + link[4].slice(5)) : "";
+    if (ed) {
+      placeBox(hoverBox, pt.slot, ed.box);
+      if (hoverBox.parentElement !== pt.slot) pt.slot.appendChild(hoverBox);
+    } else {
+      hoverBox.remove();
+    }
+    if (!link && !ed) {
+      clearTimeout(probeTimer);
+      const near = lastProbe && lastProbe.page === pt.page &&
+                   Math.abs(lastProbe.x - pt.x) < 2 && Math.abs(lastProbe.y - pt.y) < 2;
+      if (!near) probeTimer = setTimeout(() => probe(pt), 80);
+    }
+  }
+
+  function probe(pt) {
+    if (!connected || selecting) return;
+    if (probeBusy) { probeNext = pt; return; }
+    probeBusy = true;
+    lastProbe = { page: pt.page, x: pt.x, y: pt.y };
+    send({ type: "probe", page: pt.page, x: pt.x, y: pt.y });
+    // no answer (an old engine): free again
+    setTimeout(() => { probeBusy = false; }, 1500);
+  }
+
+  function onProbe(msg) {
+    probeBusy = false;
+    const b = msg.box;
+    if ((msg.kind === "field" || msg.kind === "choice") && b[2] > b[0] && b[3] > b[1]) {
+      const list = editable.get(msg.page) || [];
+      if (!list.some((e) => e.box.join() === b.join())) list.push({ box: b, kind: msg.kind });
+      editable.set(msg.page, list);
+    }
+    if (probeNext) { const p = probeNext; probeNext = null; probe(p); }
+    else if (hoverPt && hoverPt.page === msg.page) hover(hoverPt);
+  }
+
+  // a page changed: its map and its editable boxes are old
+  function pageChanged(page) {
+    editable.delete(page);
+    if (lastProbe && lastProbe.page === page) lastProbe = null;
+  }
+
+  pages.addEventListener("mousemove", (e) => {
+    if (selecting) return;
+    hover(pointOf(e));
+  });
+  pages.addEventListener("mouseleave", () => { hover(null); clearTimeout(probeTimer); });
+
+  // links: a target in the document (the engine finds its page), or a URL
+  let pendingDest = null;
+  function follow(target) {
+    if (target.startsWith("url:")) {
+      window.open(target.slice(4), "_blank", "noopener");
+      return;
+    }
+    pendingDest = target.slice(5);
+    setStatus("going to the link target…", true);
+    send({ type: "findDest", name: pendingDest });
+  }
+
+  function onDest(msg) {
+    if (msg.name !== pendingDest) return;
+    pendingDest = null;
+    if (msg.page < 0) { setStatus("link target not found", false); return; }
+    setStatus("live", false);
+    if (msg.page >= slots().length) setSlotCount(msg.page + 1);
+    const slot = slots()[msg.page];
+    const h = +slot.dataset.h || pageSize.h;
+    scroller.scrollTo({ top: slot.offsetTop + msg.y / h * slot.offsetHeight - 24 });
+    checkView();
+    // a short mark at the target
+    const mark = document.createElement("div");
+    mark.className = "olive-dest-mark";
+    mark.style.top = (msg.y / h * 100) + "%";
+    slot.appendChild(mark);
+    setTimeout(() => mark.remove(), 1600);
+  }
+
+  // Mouse: a click goes to the source (the editor cursor to the clicked
+  // character), a click on a link follows it, a drag selects text (Ctrl+C
+  // copies it), a double-click edits (quick edit)
+  let down = null, selecting = false, selection = null;   // selection: {a, b} as [page, line, char]
+  const selLayers = [];
+
+  function charAt(pt, snap) {
+    const map = pageMaps.get(pt.page);
+    if (!map) return null;
+    let best = null, bd = 1e9;
+    map.lines.forEach((l, i) => {
+      const dy = pt.y < l[1] ? l[1] - pt.y : pt.y > l[3] ? pt.y - l[3] : 0;
+      const dx = pt.x < l[0] ? l[0] - pt.x : pt.x > l[2] ? pt.x - l[2] : 0;
+      const d = dy * 4 + dx;
+      if (d < bd) { bd = d; best = i; }
+    });
+    if (best === null || (!snap && bd > 6)) return null;
+    const xs = map.lines[best][5];
+    let c = 0;
+    while (c < xs.length - 1 && (xs[c] + xs[c + 1]) / 2 < pt.x) c++;
+    return [pt.page, best, c];
+  }
+
+  const cmpPos = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+  function clearSelection() {
+    selection = null;
+    for (const l of selLayers.splice(0)) l.remove();
+  }
+
+  // the selected characters, per line: [page, line, from, to]
+  function selectedRuns() {
+    if (!selection) return [];
+    let [a, b] = [selection.a, selection.b];
+    if (cmpPos(a, b) > 0) [a, b] = [b, a];
+    const runs = [];
+    for (let p = a[0]; p <= b[0]; p++) {
+      const map = pageMaps.get(p);
+      if (!map) continue;
+      const l0 = p === a[0] ? a[1] : 0, l1 = p === b[0] ? b[1] : map.lines.length - 1;
+      for (let li = l0; li <= l1; li++) {
+        const n = map.lines[li][5].length - 1;
+        const c0 = p === a[0] && li === a[1] ? a[2] : 0;
+        const c1 = p === b[0] && li === b[1] ? b[2] : n;
+        if (c1 > c0) runs.push([p, li, c0, c1]);
+      }
+    }
+    return runs;
+  }
+
+  function drawSelection() {
+    for (const l of selLayers.splice(0)) l.remove();
+    const perPage = new Map();
+    for (const [p, li, c0, c1] of selectedRuns()) {
+      const l = pageMaps.get(p).lines[li];
+      if (!perPage.has(p)) perPage.set(p, []);
+      perPage.get(p).push([l[5][c0], l[1], l[5][c1], l[3]]);
+    }
+    for (const [p, boxes] of perPage) {
+      const slot = slots()[p];
+      if (!slot) continue;
+      const layer = document.createElement("div");
+      layer.className = "olive-sel-layer";
+      for (const b of boxes) {
+        const d = document.createElement("div");
+        d.className = "olive-sel";
+        placeBox(d, slot, b);
+        layer.appendChild(d);
+      }
+      slot.appendChild(layer);
+      selLayers.push(layer);
+    }
+  }
+
+  function selectedText() {
+    let out = "", last = null;
+    for (const [p, li, c0, c1] of selectedRuns()) {
+      const chars = [...pageMaps.get(p).lines[li][4]];
+      if (last) out += "\n";
+      out += chars.slice(c0, c1).join("");
+      last = li;
+    }
+    return out;
+  }
+
+  pages.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || e.target.closest(".olive-field")) return;
+    const pt = pointOf(e);
+    if (!pt) return;
+    e.preventDefault();                 // no native image drag
+    scroller.focus({ preventScroll: true });
+    down = { pt, x: e.clientX, y: e.clientY, at: charAt(pt, false) };
+    if (!e.shiftKey || !selection) clearSelection();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!down) return;
+    if (!selecting && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 && down.at) {
+      selecting = true;
+      hoverBox.remove();
+    }
+    if (!selecting) return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const pt = el && pointOf({ target: el, clientX: e.clientX, clientY: e.clientY });
+    const at = pt && charAt(pt, true);
+    if (!at) return;
+    selection = { a: down.at, b: at };
+    drawSelection();
+  });
+  window.addEventListener("mouseup", (e) => {
+    if (!down) return;
+    const d = down;
+    down = null;
+    if (selecting) { selecting = false; return; }
+    if (e.detail > 1 || !connected) return;     // the double-click does its own
+    const link = linkAt(d.pt);
+    if (link) { follow(link[4]); return; }
+    send({ type: "click", page: d.pt.page, x: d.pt.x, y: d.pt.y });
+  });
+
+  // Ctrl+C: the selected text; Ctrl+F: find; Ctrl+Z: undo in the editor
+  scroller.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === "c" && selection) {
+      e.preventDefault();
+      e.stopPropagation();
+      navigator.clipboard.writeText(selectedText()).then(
+        () => setStatus("copied", false), () => setStatus("could not copy", false));
+    } else if (k === "f") {
+      e.preventDefault();
+      e.stopPropagation();
+      openFind();
+    } else if (k === "z" && !detached) {
+      e.preventDefault();
+      e.stopPropagation();
+      window.postMessage({ [TAG + "Cmd"]: e.shiftKey ? "redo" : "undo" }, location.origin);
+    }
+  });
+  // Ctrl+F with the mouse over the pages (the focus may be in the editor)
+  window.addEventListener("keydown", (e) => {
+    if (!active() || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "f" || !hoverPt) return;
+    if (document.activeElement && document.activeElement.closest && document.activeElement.closest(".cm-editor")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openFind();
+  }, true);
+
+  // --- find -------------------------------------------------------------
+  const findBar = document.createElement("div");
+  findBar.className = "olive-find";
+  findBar.innerHTML = `<input type="text" placeholder="Find in the preview" spellcheck="false">
+    <span class="olive-find-count"></span>
+    <button type="button" class="olive-find-prev" title="Previous (Shift+Enter)">&#x2191;</button>
+    <button type="button" class="olive-find-next" title="Next (Enter)">&#x2193;</button>
+    <button type="button" class="olive-find-close" title="Close (Esc)">&#x2715;</button>`;
+  findBar.hidden = true;
+  pane.appendChild(findBar);
+  const findInput = findBar.querySelector("input");
+  let matches = [], matchIndex = -1;
+  const findLayers = [];
+  const norm = (t) => t.normalize("NFKC").toLowerCase();
+
+  function openFind() {
+    findBar.hidden = false;
+    const sel = selection && selectedText();
+    if (sel && sel.length < 60 && !sel.includes("\n")) findInput.value = sel;
+    findInput.focus();
+    findInput.select();
+    // the text of all pages typeset so far
+    if (pageCount > 0) send({ type: "pageMaps", first: 0, last: pageCount - 1 });
+    runFind(false);
+  }
+
+  function closeFind() {
+    findBar.hidden = true;
+    matches = [];
+    drawFind();
+    scroller.focus({ preventScroll: true });
+  }
+
+  // matches: [page, [[line, from, to]...]]; a match may go over lines
+  function runFind(keep) {
+    const q = norm(findInput.value.trim());
+    const before = matches[matchIndex];
+    matches = [];
+    if (q) {
+      for (const p of [...pageMaps.keys()].sort((a, b) => a - b)) {
+        const map = pageMaps.get(p);
+        let text = "";
+        const where = [];                 // per char of text: [line, char]
+        map.lines.forEach((l, li) => {
+          [...l[4]].forEach((ch, ci) => {
+            const n = norm(ch);
+            for (const c of n) { text += c; where.push([li, ci]); }
+          });
+          text += " ";
+          where.push([li, -1]);
+        });
+        for (let i = text.indexOf(q); i >= 0; i = text.indexOf(q, i + 1)) {
+          const parts = [];
+          for (let k = i; k < i + q.length; k++) {
+            const [li, ci] = where[k];
+            if (ci < 0) continue;
+            const last = parts[parts.length - 1];
+            if (last && last[0] === li) last[2] = ci + 1;
+            else parts.push([li, ci, ci + 1]);
+          }
+          matches.push([p, parts]);
+        }
+      }
+    }
+    matchIndex = matches.length ? 0 : -1;
+    if (keep && before) {
+      const k = matches.findIndex((m) => m[0] === before[0] && m[1][0][0] === before[1][0][0] &&
+                                         m[1][0][1] === before[1][0][1]);
+      if (k >= 0) matchIndex = k;
+    }
+    drawFind();
+    if (!keep) showMatch();
+  }
+
+  function drawFind() {
+    for (const l of findLayers.splice(0)) l.remove();
+    findBar.querySelector(".olive-find-count").textContent =
+      findInput.value.trim() ? (matches.length ? `${matchIndex + 1}/${matches.length}` : "0/0") : "";
+    const perPage = new Map();
+    matches.forEach(([p, parts], i) => {
+      const map = pageMaps.get(p);
+      for (const [li, c0, c1] of parts) {
+        const l = map.lines[li];
+        if (!perPage.has(p)) perPage.set(p, []);
+        perPage.get(p).push([[l[5][c0], l[1], l[5][c1], l[3]], i === matchIndex]);
+      }
+    });
+    for (const [p, boxes] of perPage) {
+      const slot = slots()[p];
+      if (!slot) continue;
+      const layer = document.createElement("div");
+      layer.className = "olive-sel-layer";
+      for (const [b, cur] of boxes) {
+        const d = document.createElement("div");
+        d.className = "olive-find-hit" + (cur ? " olive-find-current" : "");
+        placeBox(d, slot, b);
+        layer.appendChild(d);
+      }
+      slot.appendChild(layer);
+      findLayers.push(layer);
+    }
+  }
+
+  function showMatch() {
+    const m = matches[matchIndex];
+    if (!m) return;
+    const slot = slots()[m[0]];
+    const l = pageMaps.get(m[0]).lines[m[1][0][0]];
+    const h = +slot.dataset.h || pageSize.h;
+    const y = slot.offsetTop + l[1] / h * slot.offsetHeight;
+    if (y < scroller.scrollTop + 20 || y > scroller.scrollTop + scroller.clientHeight - 40)
+      scroller.scrollTo({ top: y - scroller.clientHeight / 3 });
+    checkView();
+  }
+
+  function step(d) {
+    if (!matches.length) return;
+    matchIndex = (matchIndex + d + matches.length) % matches.length;
+    drawFind();
+    showMatch();
+  }
+
+  findInput.addEventListener("input", () => runFind(false));
+  findInput.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    if (e.key === "Escape") { e.preventDefault(); closeFind(); }
+  });
+  findBar.querySelector(".olive-find-prev").addEventListener("click", () => step(-1));
+  findBar.querySelector(".olive-find-next").addEventListener("click", () => step(1));
+  findBar.querySelector(".olive-find-close").addEventListener("click", closeFind);
+
+  function onPageMap(msg) {
+    pageMaps.set(msg.page, msg.map);
+    pageChanged(msg.page);
+    if (selection) drawSelection();
+    if (!findBar.hidden) runFind(true);
+    if (hoverPt && hoverPt.page === msg.page) hover(hoverPt);
+  }
+
+
   // --- quick edit -------------------------------------------------------
   // A double-click on a field (the smallest $...$, {...} or [...] around the
   // clicked character, e.g. R_1 in \comp{a}{b}{R=$R_1$}): the editor selects
@@ -575,7 +1116,7 @@
     input.style.width = Math.max(8, Math.min(60, f.text.length + 3)) + "ch";
     const hint = document.createElement("span");
     hint.className = "olive-field-hint";
-    hint.textContent = "Enter: save · Esc: cancel";
+    hint.textContent = "Enter: done · Esc: undo · Tab: next argument";
     box.append(input);
     // values the module offers (e.g. gate types): a click puts one in place
     // of the field and saves; typing still works for any other value
@@ -605,9 +1146,34 @@
     slot.appendChild(box);
     fieldEl = box;
     for (const ev of ["mousedown", "dblclick", "wheel"]) box.addEventListener(ev, (e) => e.stopPropagation());
+    // Live typing: each change goes into the editor at once (so the page
+    // changes while you type); Esc puts the old text back. A name with other
+    // places (a state) changes at Enter only (all places at once).
+    const live = !(f.also && f.also.length);
+    let cur = f.text, liveTimer = null;
+    const cps = (t) => [...t].length;
+    const endOf = (t) => {
+      const lines = t.split("\n");
+      return lines.length === 1 ? [f.from[0], f.from[1] + cps(t)]
+                                : [f.from[0] + lines.length - 1, cps(lines[lines.length - 1])];
+    };
+    function put(text) {
+      if (text === cur) return true;
+      if (!docId || pathOf(docId) !== f.path) {
+        setStatus(`quick edit not saved: ${f.path} is not open in the editor`, false);
+        return false;
+      }
+      const [tl, tc] = endOf(cur);
+      window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: f.from[0], column: f.from[1],
+        toLine: tl, toColumn: tc, expect: cur, text }, location.origin);
+      cur = text;
+      return true;
+    }
     function save() {
+      clearTimeout(liveTimer);
       const text = input.value;
       closeField();
+      if (live) { put(text); return; }
       if (text === f.text) return;
       if (!docId || pathOf(docId) !== f.path) {
         setStatus(`quick edit not saved: ${f.path} is not open in the editor`, false);
@@ -617,31 +1183,66 @@
       // name everywhere (the other places are as long as the old name)
       const [s0, s1] = f.sel || [0, f.text.length];
       const pre = f.text.slice(0, s0), post = f.text.slice(s1), old = f.text.slice(s0, s1);
-      if (f.also && f.also.length && f.from[0] === f.to[0] &&
-          text.startsWith(pre) && text.endsWith(post) && text.length >= pre.length + post.length) {
+      if (f.from[0] === f.to[0] && text.startsWith(pre) && text.endsWith(post) &&
+          text.length >= pre.length + post.length) {
         const name = text.slice(pre.length, text.length - post.length);
         const at = [[f.from[0], f.from[1] + s0], ...f.also];
         const edits = at.map(([l, c]) => ({ line: l, column: c, toLine: l, toColumn: c + [...old].length,
                                             expect: old, text: name }));
         window.postMessage({ [TAG + "Cmd"]: "replace", docId, edits }, location.origin);
-        if (f.also.length) setStatus(`renamed in ${at.length} places`, false);
+        setStatus(`renamed in ${at.length} places`, false);
         return;
       }
       window.postMessage({ [TAG + "Cmd"]: "replace", docId, line: f.from[0], column: f.from[1],
         toLine: f.to[0], toColumn: f.to[1], expect: f.text, text }, location.origin);
     }
+    function cancel() {
+      clearTimeout(liveTimer);
+      closeField();
+      if (live) put(f.text);
+    }
+    if (live) input.addEventListener("input", () => {
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(() => { if (fieldEl === box) put(input.value); }, 120);
+    });
+    // Tab / Shift+Tab: the next / previous argument ({...} or [...]) in the box
+    function groups(t) {
+      const out = [];
+      let depth = 0, start = -1;
+      for (let i = 0; i < t.length; i++) {
+        const c = t[i];
+        if (c === "\\") { i++; continue; }
+        if (c === "{" || c === "[") { if (depth++ === 0) start = i + 1; }
+        else if ((c === "}" || c === "]") && depth > 0 && --depth === 0) out.push([start, i]);
+      }
+      return out;
+    }
     input.addEventListener("keydown", (e) => {
       e.stopPropagation();
-      if (e.key === "Escape") { e.preventDefault(); closeField(); }
+      if (e.key === "Escape") { e.preventDefault(); cancel(); }
       if (e.key === "Enter") { e.preventDefault(); save(); }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const g = groups(input.value);
+        if (!g.length) return;
+        const at = input.selectionStart;
+        let k = g.findIndex(([a, b]) => at >= a && at <= b);
+        if (k < 0) k = e.shiftKey ? g.length : -1;
+        k = (k + (e.shiftKey ? -1 : 1) + g.length) % g.length;
+        input.setSelectionRange(g[k][0], g[k][1]);
+      }
+    });
+    input.addEventListener("input", () => {
+      input.style.width = Math.max(8, Math.min(60, input.value.length + 3)) + "ch";
     });
     // the editor takes the focus when it opens the file and selects the
-    // field: in the first 3 s the box takes it back, later a blur closes it
+    // field: in the first 3 s the box takes it back, later a blur keeps the
+    // text and closes the box
     const opened = Date.now();
     input.addEventListener("blur", () => setTimeout(() => {
       if (fieldEl !== box) return;
       if (Date.now() - opened < 3000) input.focus();
-      else closeField();
+      else save();
     }, 150));
     // after the editor took the focus for the selection
     // the field is selected (in a command call, the clicked argument)
@@ -1109,10 +1710,15 @@
         }
         updateSlots();
         dbg.pageUpdated(msg.page);
+        pageChanged(msg.page);
+        if (msg.page >= view.first && msg.page <= view.last) {
+          clearTimeout(workTimer);
+          workTimer = setTimeout(endWork, 300);   // more pages in view may follow
+        }
         const slot = slots()[msg.page];
         if (slot) {
-          sizeSlot(slot, size);
-          slot.firstChild.src = "data:image/png;base64," + msg.png;
+          keepScroll(() => sizeSlot(slot, size));
+          showImage(slot, "data:image/png;base64," + msg.png);
           slot.classList.add("olive-loaded");
         }
         if (!status.busy && status.text !== "live") setStatus("live", false);
@@ -1126,6 +1732,7 @@
       case "errors":
         errors = msg.lines;
         showStatus();
+        showErrors(msg.items || msg.lines.map((t) => ({ text: t, file: null, line: 0 })));
         break;
       case "caret":
         clearTimeout(caretTimer);
@@ -1150,6 +1757,15 @@
         break;
       case "field":
         pendingField = msg;
+        break;
+      case "pageMap":
+        onPageMap(msg);
+        break;
+      case "probe":
+        onProbe(msg);
+        break;
+      case "dest":
+        onDest(msg);
         break;
       case "choice":
         pendingField = null;
@@ -1316,6 +1932,7 @@
     if (lastText.get(path) === msg.text) return;
     lastText.set(path, msg.text);
     send({ type: "edit", path, text: msg.text });
+    startWork();
   });
 
   // --- settings per project (shared by the editor tab and the PDF tab) ----

@@ -32,6 +32,10 @@ Messages (JSON, one per WebSocket message)
     {"type": "caretDebug", "on": bool}       debug panel: the caret map
     {"type": "caretMap", "page": n}          debug panel: the caret map of a page
     {"type": "caretElements", "page": n}     debug panel: the TikZ elements of a page
+    {"type": "click", "page": n, "x": pt, "y": pt}  single click: editor cursor there
+    {"type": "probe", "page": n, "x": pt, "y": pt}  hover: what a double-click would do
+    {"type": "pageMaps", "first": n, "last": n}     the text of pages (find)
+    {"type": "findDest", "name": s}          a link target (hyperref)
   helper -> extension
     {"type": "versions", "extension": "0.1.1"}   the version install.sh put
                                              in the Windows folder
@@ -39,7 +43,11 @@ Messages (JSON, one per WebSocket message)
     {"type": "page", "page": n, "count": n, "done": bool, "png": base64,
      "w": points, "h": points}                page size
     {"type": "count", "count": n, "done": bool}   pages so far; done: all
-    {"type": "errors", "lines": ["...", ...]}
+    {"type": "errors", "lines": ["...", ...], "items": [{"text", "file", "line"}, ...]}
+    {"type": "pageMap", "page": n, "map": {"w", "h", "lines": [[x0, y0, x1, y1, text,
+     [x of each char, x end]], ...], "links": [[x0, y0, x1, y1, "url:..."|"dest:..."], ...]}}
+    {"type": "probe", "page": n, "kind": "field"|"choice"|"text"|"none", "box": [...]}
+    {"type": "dest", "name": s, "page": n, "x": pt, "y": pt}   page -1: not found
     {"type": "caret", "page": n, "x": pt, "y": pt, "h": pt, "d": pt,
      "box": [x0, y0, x1, y1], "element": true}   the cursor in the PDF (y is the
                                              baseline; h, d: line height; box:
@@ -301,6 +309,26 @@ class Project:
                     c["path"] = rel
                     await self.send(c)
                 continue
+            if line.startswith("(page-map "):
+                m = re.match(r'^\(page-map (\d+) "((?:[^"\\]|\\.)*)"\)$', line)
+                if m:
+                    try:
+                        await self.send({"type": "pageMap", "page": int(m[1]),
+                                         "map": json.loads(unesc_sexp(m[2]))})
+                    except ValueError:
+                        pass
+                continue
+            if line.startswith("(probe "):
+                t = line[1:-1].split(" ")
+                await self.send({"type": "probe", "page": int(t[1]), "kind": t[2],
+                                 "box": [float(v) for v in t[3:7]]})
+                continue
+            if line.startswith("(dest "):
+                m = re.match(r'^\(dest "((?:[^"\\]|\\.)*)" (-?\d+) ([-\d.]+) ([-\d.]+)\)$', line)
+                if m:
+                    await self.send({"type": "dest", "name": unesc_sexp(m[1]), "page": int(m[2]),
+                                     "x": float(m[3]), "y": float(m[4])})
+                continue
             m = apply_re.match(line)
             if m:
                 rel = self.project_path(re.sub(r'\\(.)', r'\1', m[1]))
@@ -345,15 +373,37 @@ class Project:
             rel = os.path.relpath(full, self.dir)
         return None if rel.startswith("..") else rel.replace(os.sep, "/")
 
+    def file_at(self, end):
+        """the file TeX was reading at a place of its output ("(file" ... ")")"""
+        stack = []
+        for m in re.finditer(r"\(([^\s()]*)|\)", self.out[:end]):
+            if m[0] == ")":
+                if stack:
+                    stack.pop()
+            else:
+                stack.append(re.sub(r"^\./", "", m[1]) if re.search(r"\.(tex|ltx|sty|cls)$", m[1], re.I) else None)
+        for f in reversed(stack):
+            if f:
+                return f
+        return None
+
     async def report_errors(self):
-        lines = []
-        for chunk in self.out.split("\n! ")[1:]:
+        lines, items = [], []
+        parts = self.out.split("\n! ")
+        at = len(parts[0])
+        for chunk in parts[1:]:
             first = chunk.split("\n")[0].strip()
             loc = re.search(r"\nl\.(\d+)", chunk)
             lines.append(first + (f" (line {loc[1]})" if loc else ""))
+            f = self.file_at(at)
+            if f and f.startswith(str(self.dir) + "/"):
+                f = f[len(str(self.dir)) + 1:]
+            items.append({"text": first, "file": f if f and not f.startswith("/") else None,
+                          "line": int(loc[1]) if loc else 0})
+            at += 3 + len(chunk)
         if lines != self.sent_errors:
             self.sent_errors = lines
-            await self.send({"type": "errors", "lines": lines[:20]})
+            await self.send({"type": "errors", "lines": lines[:20], "items": items[:20]})
 
     # --- background compile for luabridge ----------------------------
     def schedule_lua(self):
@@ -489,6 +539,30 @@ class Project:
         x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
         await self.command(f"(synctex-scan {page} {x:.2f} {y:.2f})")
 
+    async def on_click(self, ws, msg):
+        """a single click: the editor cursor to the clicked character"""
+        if not self.proc or self.proc.returncode is not None:
+            return
+        page = max(0, int(msg.get("page", 0)))
+        x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
+        await self.command(f"(synctex-click {page} {x:.2f} {y:.2f})")
+
+    async def on_probe(self, ws, msg):
+        """what a double-click would do at a point (hover cursor)"""
+        if not self.proc or self.proc.returncode is not None:
+            return
+        page = max(0, int(msg.get("page", 0)))
+        x, y = float(msg.get("x", 0)), float(msg.get("y", 0))
+        await self.command(f"(synctex-probe {page} {x:.2f} {y:.2f})")
+
+    async def on_page_maps(self, ws, msg):
+        await self.command(f"(page-map {max(0, int(msg.get('first', 0)))} {max(0, int(msg.get('last', 0)))})")
+
+    async def on_find_dest(self, ws, msg):
+        name = msg.get("name")
+        if isinstance(name, str):
+            await self.command(f"(find-dest {sexp_string(name)})")
+
     async def on_caret_elements(self, ws, msg):
         await self.command(f"(caret-elements {max(0, int(msg.get('page', 0)))})")
 
@@ -596,7 +670,10 @@ async def handler(ws, path=None):
                     "lua": project.on_lua, "cursor": project.on_cursor,
                     "scan": project.on_scan, "caretDebug": project.on_caret_debug,
                     "caretMap": project.on_caret_map,
-                    "caretElements": project.on_caret_elements}.get(kind)
+                    "caretElements": project.on_caret_elements,
+                    "probe": project.on_probe, "pageMaps": project.on_page_maps,
+                    "click": project.on_click,
+                    "findDest": project.on_find_dest}.get(kind)
                 if handler_fn:
                     await handler_fn(ws, msg)
             except Exception as e:          # one bad message must not end the connection

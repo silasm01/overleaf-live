@@ -512,6 +512,21 @@ function onLine(run, line) {
       sel: m[11] ? [+m[11], +m[12]] : null, shared: m[13] === '1',
       options: m[14] ? unescape(m[14]).split(',').filter(Boolean) : [],
       also: m[15] ? m[15].split(';').map(p => p.split(':').map(Number)) : [] });
+  } else if (line.startsWith('(page-map ')) {
+    // (page-map page "json"): text lines, characters and links of a page
+    const m = line.match(/^\(page-map (\d+) "((?:[^"\\]|\\.)*)"\)$/);
+    if (m) {
+      try { send({ type: 'pageMap', page: +m[1], map: JSON.parse(unescape(m[2])) }); }
+      catch (e) { log('page map', e.message); }
+    }
+  } else if (line.startsWith('(probe ')) {
+    // (probe page kind x0 y0 x1 y1): what a double-click there would do
+    const t = line.slice(1, -1).split(' ');
+    send({ type: 'probe', page: +t[1], kind: t[2], box: t.slice(3, 7).map(Number) });
+  } else if (line.startsWith('(dest ')) {
+    // (dest "name" page x y): a link target
+    const m = line.match(/^\(dest "((?:[^"\\]|\\.)*)" (-?\d+) ([-\d.]+) ([-\d.]+)\)$/);
+    if (m) send({ type: 'dest', name: unescape(m[1]), page: +m[2], x: +m[3], y: +m[4] });
   } else if (line.startsWith('(synctex-choice ')) {
     const c = parseChoice(line);
     let path = c.path;
@@ -592,16 +607,36 @@ function parseElements(line) {
   return { type: 'caretElements', page, elements };
 }
 
+// the file TeX was reading at a place of its output: "(file" opens a file,
+// ")" closes one (other parentheses count too, as in the log)
+function fileAt(out, end) {
+  const stack = [];
+  const re = /\(([^\s()]*)|\)/g;
+  let m;
+  while ((m = re.exec(out)) && m.index < end) {
+    if (m[0] === ')') stack.pop();
+    else stack.push(/\.(tex|ltx|sty|cls)$/i.test(m[1]) ? m[1].replace(/^\.\//, '') : null);
+  }
+  for (let i = stack.length - 1; i >= 0; i--) if (stack[i]) return stack[i];
+  return null;
+}
+
 function reportErrors(run) {
-  const lines = [];
-  for (const chunk of run.out.split('\n! ').slice(1)) {
+  const lines = [], items = [];
+  const parts = run.out.split('\n! ');
+  let at = parts[0].length;
+  for (const chunk of parts.slice(1)) {
     const first = chunk.split('\n')[0].trim();
     const loc = chunk.match(/\nl\.(\d+)/);
     lines.push(first + (loc ? ` (line ${loc[1]})` : ''));
+    let file = fileAt(run.out, at);
+    if (file && file.startsWith(PROJECT + '/')) file = file.slice(PROJECT.length + 1);
+    items.push({ text: first, file: file && !file.startsWith('/') ? file : null, line: loc ? +loc[1] : 0 });
+    at += 3 + chunk.length;
   }
   if (JSON.stringify(lines) !== JSON.stringify(run.sentErrors)) {
     run.sentErrors = lines;
-    send({ type: 'errors', lines: lines.slice(0, 20) });
+    send({ type: 'errors', lines: lines.slice(0, 20), items: items.slice(0, 20) });
   }
 }
 
@@ -675,6 +710,23 @@ const handlers = {
   scan(client, msg) {
     if (!P.run) return;
     command(`(synctex-scan ${Math.max(0, msg.page | 0)} ${(+msg.x || 0).toFixed(2)} ${(+msg.y || 0).toFixed(2)})`);
+  },
+  // a single click: the editor cursor to the clicked character
+  click(client, msg) {
+    if (!P.run) return;
+    command(`(synctex-click ${Math.max(0, msg.page | 0)} ${(+msg.x || 0).toFixed(2)} ${(+msg.y || 0).toFixed(2)})`);
+  },
+  // what a double-click would do at a point (hover cursor)
+  probe(client, msg) {
+    if (!P.run) return;
+    command(`(synctex-probe ${Math.max(0, msg.page | 0)} ${(+msg.x || 0).toFixed(2)} ${(+msg.y || 0).toFixed(2)})`);
+  },
+  // the text of pages that are not in view (find)
+  pageMaps(client, msg) {
+    if (P.run) command(`(page-map ${Math.max(0, msg.first | 0)} ${Math.max(0, msg.last | 0)})`);
+  },
+  findDest(client, msg) {
+    if (P.run && typeof msg.name === 'string') command(`(find-dest ${sexpString(msg.name)})`);
   },
   lua(client, msg) { P.lua = !!msg.on; },
   // the caret map of every source line on one page (debug panel, whole page)

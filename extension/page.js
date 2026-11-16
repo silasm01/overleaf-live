@@ -138,6 +138,14 @@
       sendText();
       sendCursor(true);
     }
+    // Ctrl+Z / Ctrl+Shift+Z in the live viewer: the editor's undo / redo
+    // (as the key in the editor: CodeMirror's history, e.g. of a quick edit)
+    if ((cmd === "undo" || cmd === "redo") && view) {
+      const mac = /Mac/.test(navigator.platform);
+      view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "z", code: "KeyZ", ctrlKey: !mac, metaKey: mac, shiftKey: cmd === "redo",
+        bubbles: true, cancelable: true }));
+    }
     if (cmd === "goto" && evt.data.docId === docId)
       gotoPosition(evt.data.line, evt.data.column, evt.data.toLine, evt.data.toColumn);
     // quick edit: replace a field, if it still has the text it had
