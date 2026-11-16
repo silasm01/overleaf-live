@@ -781,7 +781,9 @@
 
   function editableAt(pt) {
     const list = editable.get(pt.page);
-    return list && list.find((e) => inBox(e.box, pt.x, pt.y, 0.5));
+    // (1.5 pt around the box: the engine's answer also counts a point just
+    // outside the glyphs)
+    return list && list.find((e) => inBox(e.box, pt.x, pt.y, 1.5));
   }
 
   // the cursor and the outline for the point under the mouse
@@ -801,7 +803,9 @@
     } else {
       hoverBox.remove();
     }
-    if (!link && !ed && cacheState.get(pt.page) !== "ok") {
+    // not in the cache (or no cache yet): the engine is asked, and its answer
+    // is kept for the box
+    if (!link && !ed) {
       clearTimeout(probeTimer);
       const near = lastProbe && lastProbe.page === pt.page &&
                    Math.abs(lastProbe.x - pt.x) < 2 && Math.abs(lastProbe.y - pt.y) < 2;
@@ -822,7 +826,11 @@
   function onProbe(msg) {
     probeBusy = false;
     // latency: from the probe (80 ms after the mouse stopped) to the answer
-    if (lastProbe && lastProbe.at) { latency("hover → cursor (engine)", performance.now() - lastProbe.at + 80); lastProbe.at = 0; }
+    if (lastProbe && lastProbe.at && (msg.kind === "field" || msg.kind === "choice")) {
+      latency("hover → cursor (engine)", performance.now() - lastProbe.at + 80,
+              cacheState.get(msg.page) === "ok" ? "not in the cache" : "no cache yet");
+    }
+    if (lastProbe) lastProbe.at = 0;
     const b = msg.box;
     if ((msg.kind === "field" || msg.kind === "choice") && b[2] > b[0] && b[3] > b[1]) {
       const list = editable.get(msg.page) || [];

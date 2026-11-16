@@ -346,8 +346,15 @@ function step() {
     run.formatSaved = true;
     saveFormat(run.engine.FS).catch(e => log('format not saved: ' + e));
   }
-  run.inViewDone = !more;
-  if (more) { pump(); return; }
+  // the pages in view are done when the engine has no more work for them,
+  // or when it is running on to the end of the document (deep compile)
+  run.inViewDone = !more || run.toEnd;
+  if (more) {
+    // in the deep compile: a cache the viewer asked for first (hover, caret)
+    if (run.toEnd && flushCache()) return;
+    pump();
+    return;
+  }
   // the pages in view are done: the caches the viewer asked for
   if (flushCache()) return;
   if (P.lastMsg.status && P.lastMsg.status.busy && P.lastMsg.status.text === 'typesetting') status('live', false);
