@@ -279,7 +279,7 @@ async function start() {
     P.run = run;
     P.pages.clear();
     command(`(export-png ${sexpString(EXPORT)} ${P.width})`);
-    command(`(export-range ${P.first} ${P.last})`);
+    command(`(export-range 0 ${ALL_PAGES} ${P.last})`);
     if (P.caretDebug) command('(caret-debug t)');
     command('(rescan)');
     status('typesetting', true);
@@ -360,7 +360,8 @@ function step() {
   if (P.lastMsg.status && P.lastMsg.status.busy && P.lastMsg.status.text === 'typesetting') status('live', false);
   // after a pause in typing only (as the helper's latexmk), so that edits
   // stay fast:
-  const quiet = BACKGROUND_PAUSE - (performance.now() - P.lastActivity);
+  // (no edit since the start: at once, so all pages come as soon as possible)
+  const quiet = run.edited ? BACKGROUND_PAUSE - (performance.now() - P.lastActivity) : 0;
   if (quiet > 0) { setTimeout(pump, quiet + 5); return; }
   // The view is done: go on to the end of the document in the background,
   // then give the outputs (.aux, .toc, ...) back as inputs (a second pass).
@@ -388,6 +389,7 @@ function step() {
 // TeXpresso then goes back to where it read them. If the .aux names a
 // bibliography (\bibdata), BibTeX makes the .bbl first. At most 3 passes per
 // change.
+const ALL_PAGES = 100000;         // export-range: all pages
 const BACKGROUND_PAUSE = 2000;   // ms without edits before the second pass (helper: LUA_IDLE)
 
 function secondPass(run) {
@@ -757,6 +759,9 @@ const handlers = {
     log(`project ${P.id}: ${P.files.size} files`);
     if (P.run) {
       for (const [rel, data] of P.files) writeProjectFile(rel, data);
+      // a picture file can change a page without changing its DVI code:
+      // all pages are drawn again (if they changed)
+      command(`(export-png ${sexpString(EXPORT)} ${P.width})`);
       command('(rescan)');
       status('project files updated', false);
     } else {
@@ -767,12 +772,15 @@ const handlers = {
     const rel = safeRel(msg.path || '');
     if (!rel) return;
     const text = String(msg.text || '');
-    P.files.set(rel, new TextEncoder().encode(text));
+    const data = new TextEncoder().encode(text), old = P.files.get(rel);
+    const changed = !old || old.length !== data.length || old.some((b, i) => b !== data[i]);
+    P.files.set(rel, data);
     if (!P.run) { await start(); }
     writeProjectFile(rel, P.files.get(rel));
     P.lastActivity = performance.now();
     if (P.run) {
       P.run.passes = 0;
+      if (changed) P.run.edited = true;    // (the same text again: e.g. the editor at the start)
       P.run.inViewDone = false;
       P.cacheQueue.length = 0;    // the pages change: the viewer asks again
       P.run.tWork = P.run.tEdit = performance.now();
@@ -795,7 +803,10 @@ const handlers = {
     P.last = Math.max(P.first, Math.min(P.first + 20, msg.last | 0));
     P.lastActivity = performance.now();
     for (let page = P.first; page <= P.last; page++) if (P.pages.has(page)) send(P.pages.get(page), client);
-    command(`(export-range ${P.first} ${P.last})`);
+    // all pages are exported (as if scrolled past them; the engine draws a
+    // page again only when its DVI code changed); the engine runs at once
+    // up to the pages in view, the rest in the deep compile
+    command(`(export-range 0 ${ALL_PAGES} ${P.last})`);
   },
   width(client, msg) {
     const width = Math.max(200, Math.min(4000, msg.width | 0 || 1000));

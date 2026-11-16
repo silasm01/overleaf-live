@@ -220,7 +220,7 @@ class Project:
         self.pages.clear()
         self.reader = asyncio.create_task(self.read_texpresso(self.proc))
         await self.command(f"(export-png {sexp_string(str(self.export_dir))} {int(self.width)})")
-        await self.command(f"(export-range {self.first} {self.last})")
+        await self.command("(export-range 0 100000)")   # all pages (the engine draws only changed ones)
         if self.caret_debug:
             await self.command("(caret-debug t)")
         await self.command("(rescan)")
@@ -547,7 +547,7 @@ class Project:
         for page in range(self.first, self.last + 1):
             if page in self.pages:
                 await self.send(self.pages[page], to=ws)
-        await self.command(f"(export-range {self.first} {self.last})")
+        await self.command("(export-range 0 100000)")   # all pages (the engine draws only changed ones)
 
     async def on_width(self, ws, msg):
         width = max(200, min(4000, int(msg.get("width", 1000))))

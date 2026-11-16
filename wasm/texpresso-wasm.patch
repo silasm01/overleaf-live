@@ -472,7 +472,7 @@ index 3096732..3d14cd4 100644
  txp_client *txp_connect(FILE *file)
  {
 diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
-index 4e2c078..3d7eb99 100644
+index aeb39a2..6ff1e58 100644
 --- a/src/frontend/engine_tex.c
 +++ b/src/frontend/engine_tex.c
 @@ -217,6 +217,19 @@ static int olive_alias(struct tex_engine *self, fileentry_t *w, const char *name
@@ -688,7 +688,7 @@ index 4e2c078..3d7eb99 100644
    {
      if (self->trace[trace].time <= time && possible_fence(&self->trace[trace]))
      {
-@@ -1765,6 +1930,51 @@ static fileentry_t *engine_find_file(txp_engine *_self, fz_context *ctx, const c
+@@ -1775,6 +1940,51 @@ static fileentry_t *engine_find_file(txp_engine *_self, fz_context *ctx, const c
    return filesystem_lookup_or_create(ctx, self->fs, path);
  }
  
@@ -741,10 +741,10 @@ index 4e2c078..3d7eb99 100644
                                    const char *engine_path,
                                    bool use_texlive,
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index 2fff7fc..2a23680 100644
+index b280627..7afcbd5 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -2067,6 +2067,19 @@ static void page_fields(struct persistent_state *ps, ui_state *ui, int page, int
+@@ -2069,6 +2069,19 @@ static void page_fields(struct persistent_state *ps, ui_state *ui, int page, int
  
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
@@ -764,7 +764,7 @@ index 2fff7fc..2a23680 100644
    const char *rel_path = path, *dir_path = dir;
  
    // Skip common parts
-@@ -3326,7 +3339,12 @@ static void interpret_command(struct persistent_state *ps,
+@@ -3356,7 +3369,12 @@ static void interpret_command(struct persistent_state *ps,
        }
        else
        {
@@ -777,7 +777,7 @@ index 2fff7fc..2a23680 100644
          synctex_set_target_column(stx, cmd.synctex_forward.column);
          snprintf(caret_path, sizeof caret_path, "%s", path);
          caret_line = cmd.synctex_forward.line;
-@@ -4079,3 +4097,205 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -4112,3 +4130,206 @@ bool texpresso_main(struct persistent_state *ps)
  
    return reload;
  }
@@ -912,6 +912,7 @@ index 2fff7fc..2a23680 100644
 +  bool advance = advance_engine(ps->ctx, ui);
 +  send(finish_convergence, ui->eng, ps->ctx);
 +  int after = send(page_count, ui->eng);
++  dest_progress(ps->ctx, ui);   /* a link target on a page typeset now */
 +  if (ui->page >= before && ui->page < after)
 +    wasm_schedule_event(RELOAD_EVENT);
 +  else if (export_dir[0] && after > before && export_last >= before && export_first < after)

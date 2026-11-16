@@ -1,4 +1,4 @@
-From f166aa72f8c2f405c942e19bca92a4317e711520 Mon Sep 17 00:00:00 2001
+From c88aa8fccc1a8d76178f050a04fbb9879ad7c152 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -15,13 +15,15 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/engine/engine/xetex-synctex.c |   44 +-
  src/engine/engine/xetex-xetex0.c  |   25 +-
  src/engine/engine/xetex-xetexd.h  |   11 +
- src/frontend/editor.c             |  145 +-
+ src/frontend/editor.c             |  148 +-
  src/frontend/editor.h             |   47 +
- src/frontend/engine_tex.c         |  162 +-
- src/frontend/main.c               | 2358 +++++++++++++++++++++
+ src/frontend/engine_tex.c         |  172 +-
+ src/frontend/incdvi.c             |   16 +
+ src/frontend/incdvi.h             |    2 +
+ src/frontend/main.c               | 2391 ++++++++++++++++++++++
  src/frontend/synctex.c            | 3172 ++++++++++++++++++++++++++++-
  src/frontend/synctex.h            |  158 ++
- 15 files changed, 6386 insertions(+), 61 deletions(-)
+ 17 files changed, 6450 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
 index 4045ab1..6c3ac9a 100644
@@ -781,10 +783,10 @@ index 183c218..ee3637a 100644
  #define GLUE_SPEC_stretch_order(p) mem[p].b16.s1 /* aka "type" of a node */
  #define GLUE_SPEC_shrink_order(p) mem[p].b16.s0 /* aka "subtype" of a node */
 diff --git a/src/frontend/editor.c b/src/frontend/editor.c
-index 6face98..cdd20bf 100644
+index 6face98..43b0fd8 100644
 --- a/src/frontend/editor.c
 +++ b/src/frontend/editor.c
-@@ -219,6 +219,50 @@ bool editor_parse(fz_context *ctx,
+@@ -219,6 +219,53 @@ bool editor_parse(fz_context *ctx,
              .h = val_number(ctx, val_array_get(ctx, stack, command, 4)),
          }};
    }
@@ -806,17 +808,20 @@ index 6face98..cdd20bf 100644
 +  }
 +  else if (strcmp(verb, "export-range") == 0)
 +  {
-+    // (export-range first last): the pages to keep exported (from 0)
-+    if (len != 3)
++    // (export-range first last [target]): the pages to keep exported (from
++    // 0); target: the page the engine runs up to (default: last)
++    if (len != 3 && len != 4)
 +      goto arity;
 +    val first = val_array_get(ctx, stack, command, 1);
 +    val last = val_array_get(ctx, stack, command, 2);
-+    if (!val_is_number(first) || !val_is_number(last))
++    val target = len == 4 ? val_array_get(ctx, stack, command, 3) : last;
++    if (!val_is_number(first) || !val_is_number(last) || !val_is_number(target))
 +      goto arguments;
 +    *out = (struct editor_command){
 +        .tag = EDIT_EXPORT_RANGE,
 +        .export_range = {.first = val_number(ctx, first),
-+                         .last = val_number(ctx, last)},
++                         .last = val_number(ctx, last),
++                         .target = len == 4 ? val_number(ctx, target) : -1},
 +    };
 +  }
 +  else if (strcmp(verb, "goto-page") == 0)
@@ -835,7 +840,7 @@ index 6face98..cdd20bf 100644
    else if (strcmp(verb, "rescan") == 0)
    {
      if (len != 1)
-@@ -252,23 +296,122 @@ bool editor_parse(fz_context *ctx,
+@@ -252,23 +299,122 @@ bool editor_parse(fz_context *ctx,
      *out = (struct editor_command){.tag = EDIT_STAY_ON_TOP,
                                     .stay_on_top = {.status = status}};
    }
@@ -960,7 +965,7 @@ index 6face98..cdd20bf 100644
    {
      if (len != 1)
 diff --git a/src/frontend/editor.h b/src/frontend/editor.h
-index 05fdd1c..199f006 100644
+index 05fdd1c..cd4acfe 100644
 --- a/src/frontend/editor.h
 +++ b/src/frontend/editor.h
 @@ -28,6 +28,9 @@ enum EDITOR_COMMAND
@@ -1035,13 +1040,13 @@ index 05fdd1c..199f006 100644
 +    } goto_page;
 +
 +    struct {
-+      int first, last;
++      int first, last, target;
 +    } export_range;
    };
  };
  
 diff --git a/src/frontend/engine_tex.c b/src/frontend/engine_tex.c
-index 5866b1b..4e2c078 100644
+index 5866b1b..aeb39a2 100644
 --- a/src/frontend/engine_tex.c
 +++ b/src/frontend/engine_tex.c
 @@ -27,6 +27,7 @@
@@ -1243,11 +1248,71 @@ index 5866b1b..4e2c078 100644
        channel_write_answer(self->c, p->fd, &a);
        break;
      }
+@@ -1125,6 +1281,16 @@ static int engine_page_count(txp_engine *_self)
+   return incdvi_page_count(self->dvi);
+ }
+ 
++/* Overleaf Live: the hash of a page's DVI code (main.c: a page that did not
++   change is not drawn again); 0 if there is no such page */
++uint64_t tex_engine_page_hash(txp_engine *_self, int page)
++{
++  SELF;
++  if (!self->st.document.entry || page < 0 || page >= incdvi_page_count(self->dvi))
++    return 0;
++  return incdvi_page_hash(self->dvi, self->st.document.entry->saved.data, page);
++}
++
+ static fz_display_list *engine_render_page(txp_engine *_self, fz_context *ctx, int page)
+ {
+   SELF;
+diff --git a/src/frontend/incdvi.c b/src/frontend/incdvi.c
+index 1f96d92..ee786e9 100644
+--- a/src/frontend/incdvi.c
++++ b/src/frontend/incdvi.c
+@@ -216,3 +216,19 @@ float incdvi_tex_scale_factor(incdvi_t *d)
+     return 1;
+   return d->dc->scale;
+ }
++
++/* Overleaf Live: a hash of a page's DVI code (after its bop, whose
++   counters and pointer to the previous page change with earlier pages),
++   0 if there is no such page: the same hash, the same picture */
++uint64_t incdvi_page_hash(incdvi_t *d, fz_buffer *buf, int page)
++{
++  if (!buf || page < 0 || 2 * page + 1 >= d->page_len)
++    return 0;
++  int a = d->pages[page * 2] + 45, b = d->pages[page * 2 + 1];
++  if (a > b || (size_t)b >= buf->len)
++    return 0;
++  uint64_t h = 14695981039346656037ULL;
++  for (int i = a; i <= b; i++)
++    h = (h ^ buf->data[i]) * 1099511628211ULL;
++  return h ? h : 1;
++}
+diff --git a/src/frontend/incdvi.h b/src/frontend/incdvi.h
+index 852f744..637c606 100644
+--- a/src/frontend/incdvi.h
++++ b/src/frontend/incdvi.h
+@@ -25,6 +25,7 @@
+ #ifndef INCDVI_H
+ #define INCDVI_H
+ 
++#include <stdint.h>
+ #include <mupdf/fitz.h>
+ #include <stdbool.h>
+ #include "../dvi/mydvi.h"
+@@ -41,5 +42,6 @@ void incdvi_page_dim(incdvi_t *d, fz_buffer *buf, int page, float *width, float
+ void incdvi_render_page(fz_context *ctx, incdvi_t *d, fz_buffer *buf, int page, fz_device *dev);
+ void incdvi_find_page_loc(fz_context *ctx, incdvi_t *d, fz_buffer *buf, int page);
+ float incdvi_tex_scale_factor(incdvi_t *d);
++uint64_t incdvi_page_hash(incdvi_t *d, fz_buffer *buf, int page);
+ 
+ #endif /*!INCDVI_H*/
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..2fff7fc 100644
+index c202294..b280627 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1548 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1550 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -1432,8 +1497,10 @@ index c202294..2fff7fc 100644
 +static void interpret_open(struct persistent_state *ps, ui_state *ui,
 +                           const char *path, const void *data, int size);
 +
++static int olive_tex;   /* the TeX engine (see export_pages) */
 +static void olive_install(struct persistent_state *ps, ui_state *ui)
 +{
++  olive_tex = 1;
 +  if (getenv("TXP_NO_OLIVE"))   /* to compare the output without the markers */
 +    return;
 +  interpret_open(ps, ui, "pgf.cfg", olive_pgf_cfg, (int)strlen(olive_pgf_cfg));
@@ -2796,7 +2863,7 @@ index c202294..2fff7fc 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +2459,694 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2461,722 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -3158,6 +3225,7 @@ index c202294..2fff7fc 100644
 +   on a page that is not typeset yet: the engine goes on (the front-end
 +   shows only some pages) and looks at each new page (dest_progress). */
 +static char dest_pending[400];
++static int export_target = 0;    /* the page the engine runs up to (export-range) */
 +static int dest_next;
 +
 +static void dest_reply(const char *name, int page, float x, float y)
@@ -3237,7 +3305,7 @@ index c202294..2fff7fc 100644
 +    if (find_dest_in(ctx, ui, dest_pending, dest_next, to))
 +    {
 +      dest_pending[0] = 0;
-+      ui->page = export_last;
++      ui->page = export_target;
 +      return;
 +    }
 +    dest_next = to;
@@ -3246,7 +3314,7 @@ index c202294..2fff7fc 100644
 +  {
 +    dest_reply(dest_pending, -1, 0, 0);
 +    dest_pending[0] = 0;
-+    ui->page = export_last;
++    ui->page = export_target;
 +  }
 +}
 +
@@ -3266,10 +3334,19 @@ index c202294..2fff7fc 100644
 +static int export_hash_len = 0;
 +static int export_reported_count = -1, export_reported_done = -1;
 +
++/* the DVI hash of each page when it was last exported (olive_tex: only the
++   TeX engine has it) */
++static uint64_t *export_dvi = NULL;
++static int export_dvi_len = 0;
++static int olive_tex = 0;
++extern uint64_t tex_engine_page_hash(txp_engine *eng, int page);
++
 +static void export_forget(void)
 +{
 +  for (int i = 0; i < export_hash_len; i++)
 +    export_hash[i] = 0;
++  for (int i = 0; i < export_dvi_len; i++)
++    export_dvi[i] = 0;
 +}
 +
 +static uint64_t hash_bytes(const unsigned char *d, size_t n, uint64_t h)
@@ -3484,14 +3561,32 @@ index c202294..2fff7fc 100644
 +    export_reported_done = done;
 +  }
 +  for (int page = export_first; page <= export_last && page < count; page++)
++  {
++    /* the same DVI code as when it was last exported: the same picture (so
++       all pages can stay exported: only the changed ones are drawn) */
++    uint64_t dh = olive_tex ? tex_engine_page_hash(ui->eng, page) : 0;
++    if (dh && page < export_dvi_len && export_dvi[page] == dh)
++      continue;
 +    export_one(ctx, ui, page, count, done);
++    if (page >= export_dvi_len)
++    {
++      int len = page + 64;
++      export_dvi = realloc(export_dvi, len * sizeof(uint64_t));
++      if (!export_dvi)
++        abort();
++      for (int i = export_dvi_len; i < len; i++)
++        export_dvi[i] = 0;
++      export_dvi_len = len;
++    }
++    export_dvi[page] = dh;
++  }
 +  fflush(stdout);
 +}
 +
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +3299,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +3329,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -3511,7 +3606,7 @@ index c202294..2fff7fc 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +3327,79 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +3357,79 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -3591,7 +3686,7 @@ index c202294..2fff7fc 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +3445,35 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +3475,38 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -3611,7 +3706,7 @@ index c202294..2fff7fc 100644
 +    case EDIT_GOTO_PAGE:
 +      synctex_set_target(send(synctex, ui->eng, NULL), 0, NULL, 0);
 +      ui->page = cmd.goto_page.page < 0 ? 0 : cmd.goto_page.page;
-+      export_first = export_last = ui->page;
++      export_first = export_last = export_target = ui->page;
 +      schedule_event(RELOAD_EVENT);
 +      break;
 +
@@ -3619,7 +3714,10 @@ index c202294..2fff7fc 100644
 +      synctex_set_target(send(synctex, ui->eng, NULL), 0, NULL, 0);
 +      export_first = cmd.export_range.first < 0 ? 0 : cmd.export_range.first;
 +      export_last = cmd.export_range.last < export_first ? export_first : cmd.export_range.last;
-+      ui->page = export_last;          // the engine runs up to this page
++      // the engine runs up to this page (the target, if given: all pages
++      // can be exported while the engine stops at the pages in view)
++      export_target = cmd.export_range.target >= 0 ? cmd.export_range.target : export_last;
++      ui->page = export_target;
 +      if (dest_pending[0])
 +        ui->page = 1 << 20;            // (or on, for a link target)
 +      schedule_event(RELOAD_EVENT);
@@ -3627,7 +3725,7 @@ index c202294..2fff7fc 100644
    }
  }
  
-@@ -1234,9 +3574,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3607,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -3640,7 +3738,7 @@ index c202294..2fff7fc 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1349,10 +3692,19 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3725,19 @@ bool texpresso_main(struct persistent_state *ps)
        bool advance = !ps->paused && advance_engine(ps->ctx, ui);
        send(finish_convergence, ui->eng, ps->ctx);
        int after_page_count = send(page_count, ui->eng);
@@ -3660,7 +3758,7 @@ index c202294..2fff7fc 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +3757,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3790,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -3672,7 +3770,7 @@ index c202294..2fff7fc 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +4037,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +4070,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
