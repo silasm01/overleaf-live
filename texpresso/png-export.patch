@@ -1,4 +1,4 @@
-From c88aa8fccc1a8d76178f050a04fbb9879ad7c152 Mon Sep 17 00:00:00 2001
+From e3d332437d1d08650d23b3f3628c96ba0ab1b9d7 Mon Sep 17 00:00:00 2001
 From: Silas Mikkelsen <noreply@example.com>
 Date: Fri, 13 Nov 2026 18:27:36 +0100
 Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
@@ -20,10 +20,10 @@ Subject: [PATCH] Overleaf Live: PNG export of the visible pages, page
  src/frontend/engine_tex.c         |  172 +-
  src/frontend/incdvi.c             |   16 +
  src/frontend/incdvi.h             |    2 +
- src/frontend/main.c               | 2391 ++++++++++++++++++++++
+ src/frontend/main.c               | 2494 +++++++++++++++++++++++
  src/frontend/synctex.c            | 3172 ++++++++++++++++++++++++++++-
  src/frontend/synctex.h            |  158 ++
- 17 files changed, 6450 insertions(+), 61 deletions(-)
+ 17 files changed, 6553 insertions(+), 61 deletions(-)
 
 diff --git a/src/dvi/dvi_context.c b/src/dvi/dvi_context.c
 index 4045ab1..6c3ac9a 100644
@@ -1309,10 +1309,10 @@ index 852f744..637c606 100644
  
  #endif /*!INCDVI_H*/
 diff --git a/src/frontend/main.c b/src/frontend/main.c
-index c202294..b280627 100644
+index c202294..7d5f88f 100644
 --- a/src/frontend/main.c
 +++ b/src/frontend/main.c
-@@ -523,6 +523,1550 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
+@@ -523,6 +523,1653 @@ static void ui_pan(fz_context *ctx, ui_state *ui, float factor)
    schedule_event(RENDER_EVENT);
  }
  
@@ -2585,6 +2585,30 @@ index c202294..b280627 100644
 +   action: a menu, a list of values, a name) */
 +struct pf_list { int n, cap; struct { char kind; synctex_box b; } *v; };
 +
++static int pm_unicode(fz_context *ctx, fz_font *font, int gid);
++
++/* p is in a control sequence (\name, or the \ of one) */
++static int pf_in_command(const int *t, int len, int p)
++{
++  if (t[p] == '\\') return 1;
++  int letter = (t[p] >= 'a' && t[p] <= 'z') || (t[p] >= 'A' && t[p] <= 'Z') || t[p] == '@';
++  if (!letter) return p > 0 && t[p - 1] == '\\';
++  int i = p;
++  while (i > 0 && ((t[i - 1] >= 'a' && t[i - 1] <= 'z') || (t[i - 1] >= 'A' && t[i - 1] <= 'Z') ||
++                   t[i - 1] == '@'))
++    i--;
++  (void)len;
++  return i > 0 && t[i - 1] == '\\';
++}
++
++/* a glyph's box (its ink box, or a line's height around its baseline) */
++static synctex_box pf_glyph_box(const synctex_glyph *g)
++{
++  synctex_box b = {g->x0, g->y0 < g->y1 ? g->y0 : g->y - 7 * 65536,
++                   g->x1, g->y0 < g->y1 ? g->y1 : g->y + 2 * 65536};
++  return b;
++}
++
 +static void pf_add(struct pf_list *l, char kind, synctex_box b)
 +{
 +  if (b.x1 <= b.x0 || b.y1 <= b.y0) return;
@@ -2621,6 +2645,9 @@ index c202294..b280627 100644
 +    synctex_glyph *glyphs = page_scan(ctx, ui->eng, page, &ng, &els, &ne);
 +    synctex_resolve_elements(ctx, stx, buf, page, els, ne);
 +    char *done = calloc(ng + 1, 1);
++    /* the field (a, b) of each text glyph, and the glyphs that have one */
++    int *fa = malloc((ng + 1) * sizeof(int)), *fb = malloc((ng + 1) * sizeof(int));
++    int *fset = malloc((ng + 1) * sizeof(int)), *fp = malloc((ng + 1) * sizeof(int));
 +
 +    /* module markers with an action, and plot lines */
 +    for (int k = 0; k < ne; k++)
@@ -2701,6 +2728,11 @@ index c202294..b280627 100644
 +      info.boxes = caret_boxes;
 +      info.capboxes = CAP_BOXES;
 +      synctex_caret_map(ctx, stx, buf, page, glyphs, ng, tag, &file, lines, k, off, &info);
++      /* text fields: only in the project's source (not main.toc, main.aux,
++         a .luaout file: TeX writes them) */
++      char srcname[1100];
++      snprintf(srcname, sizeof srcname, "%.*s", len, name);
++      int source = is_source_file(srcname);
 +      /* lines also on the page before or after (a paragraph across the page
 +         break): the engine may put the caret on the other page; not cached */
 +      static int adj[2 * MAXLINES];
@@ -2805,7 +2837,8 @@ index c202294..b280627 100644
 +        fz_drop_buffer(ctx, pb);
 +        nfiles++;
 +      }
-+      for (int gi = 0; gi < ng; gi++)
++      int nfset = 0;
++      for (int gi = 0; gi < ng && source; gi++)
 +      {
 +        if (done[gi]) continue;
 +        const synctex_glyph *g = &glyphs[gi];
@@ -2825,22 +2858,92 @@ index c202294..b280627 100644
 +        done[gi] = 1;
 +        if (caret_pts[best].line < 1 || caret_pts[best].line > file.nlines) continue;
 +        int p = file.line_off[caret_pts[best].line - 1] + caret_pts[best].col, a, b;
++        /* a caret before the character (on the space before it): the
++           character */
++        while (p < file.len && (file.text[p] == ' ' || file.text[p] == '\t')) p++;
 +        if (!synctex_text_field(file.text, file.len, p, &a, &b)) continue;
-+        synctex_box tb = {g->x0, g->y0 < g->y1 ? g->y0 : g->y - 7 * 65536,
-+                          g->x1, g->y0 < g->y1 ? g->y1 : g->y + 2 * 65536};
-+        for (int j = 0; j < info.npts; j++)
++        fa[gi] = a;
++        fb[gi] = b;
++        fp[gi] = p;
++        fset[nfset++] = gi;
++      }
++      /* one box for each run of glyphs of the same field on one line (no
++         wide gap): the field's glyphs as they are on the page, not
++         stretched to carets elsewhere, and no box over another of the same
++         field */
++      for (int u = 0; u < nfset; u++)
++      {
++        int g0 = fset[u];
++        if (fa[g0] < 0) continue;
++        int a = fa[g0], b = fb[g0];
++        synctex_box tb = pf_glyph_box(&glyphs[g0]);
++        int base = glyphs[g0].y;
++        /* the run is the field's text if one of its glyphs is the character
++           of the source there (not text that a macro or a .toc file makes,
++           e.g. "Contents", page numbers, or that only a few letters of
++           another line match) */
++        int literal = 0, nrun = 1, made = 0;
++#define PF_LITERAL(gi) (fp[gi] >= 0 && fp[gi] < file.len && file.text[fp[gi]] > 32 && \
++                        pm_unicode(ctx, glyphs[gi].font, glyphs[gi].gid) == file.text[fp[gi]])
++        /* a glyph that a command makes (\ohm: Ω): its caret is on the command */
++#define PF_MADE(gi) (fp[gi] >= 0 && fp[gi] < file.len && pf_in_command(file.text, file.len, fp[gi]))
++        if (PF_LITERAL(g0)) literal++;
++        else if (PF_MADE(g0)) made++;
++        fa[g0] = -1;
++        for (int grew = 1; grew;)
 +        {
-+          if (caret_pts[j].line < 1 || caret_pts[j].line > file.nlines) continue;
-+          int q = file.line_off[caret_pts[j].line - 1] + caret_pts[j].col;
-+          if (q < a || q > b || abs(caret_pts[j].y - g->y) > 30 * 65536) continue;
-+          if (caret_pts[j].x < tb.x0) tb.x0 = caret_pts[j].x;
-+          if (caret_pts[j].x > tb.x1) tb.x1 = caret_pts[j].x;
++          grew = 0;
++          for (int v = u + 1; v < nfset; v++)
++          {
++            int gi = fset[v];
++            if (fa[gi] != a || fb[gi] != b) continue;
++            const synctex_glyph *g = &glyphs[gi];
++            synctex_box gb = pf_glyph_box(g);
++            /* on the run's line: the same baseline, or (sub- and superscripts,
++               a fraction) a box that overlaps the run's vertically */
++            int ov = (gb.y1 < tb.y1 ? gb.y1 : tb.y1) - (gb.y0 > tb.y0 ? gb.y0 : tb.y0);
++            int hmin = gb.y1 - gb.y0 < tb.y1 - tb.y0 ? gb.y1 - gb.y0 : tb.y1 - tb.y0;
++            if (abs(g->y - base) > 65536 && !(hmin > 0 && 3 * ov > hmin)) continue;
++            int gap = 6 * 65536;
++            if (g->x0 > tb.x1 + gap || g->x1 < tb.x0 - gap) continue;
++            if (gb.x0 < tb.x0) tb.x0 = gb.x0;
++            if (gb.y0 < tb.y0) tb.y0 = gb.y0;
++            if (gb.x1 > tb.x1) tb.x1 = gb.x1;
++            if (gb.y1 > tb.y1) tb.y1 = gb.y1;
++            if (PF_LITERAL(gi)) literal++;
++            else if (PF_MADE(gi)) made++;
++            nrun++;
++            fa[gi] = -1;
++            grew = 1;
++          }
 +        }
++#undef PF_LITERAL
++#undef PF_MADE
++        /* half of the glyphs at least are the source's characters or made
++           by its commands */
++        if (getenv("TXP_PF_DEBUG"))
++          fprintf(stderr, "[pf-run] %d-%d n %d literal %d made %d\n", a, b, nrun, literal, made);
++        if (!(literal + made > 0 && 2 * (literal + made) >= nrun))
++          continue;
 +        pf_add(&list, 'n', tb);
++        if (getenv("TXP_PF_DEBUG"))
++        {
++          char tx[64];
++          int m = 0;
++          for (int c = a; c < b && m < 60; c++)
++            tx[m++] = file.text[c] < 128 && file.text[c] >= 32 ? (char)file.text[c] : '?';
++          tx[m] = 0;
++          fprintf(stderr, "[pf] %.*s %d-%d \"%s\" %.1f %.1f %.1f %.1f\n", len, name, a, b, tx,
++                  tb.x0 / 65536.0, tb.y0 / 65536.0, tb.x1 / 65536.0, tb.y1 / 65536.0);
++        }
 +      }
 +      caret_file_free(ctx, &file);
 +    }
 +    free(done);
++    free(fa);
++    free(fb);
++    free(fset);
++    free(fp);
 +    fz_free(ctx, els);
 +    drop_glyphs(ctx, glyphs, ng);
 +  }
@@ -2863,7 +2966,7 @@ index c202294..b280627 100644
  static const char *relative_path(const char *path, const char *dir, int *go_up)
  {
    const char *rel_path = path, *dir_path = dir;
-@@ -917,6 +2461,722 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
+@@ -917,6 +2564,722 @@ static uint32_t convert_color(fz_context *ctx, vstack *stack, float frgb[3])
    return (rgb[0] << 16) | (rgb[1] << 8) | (rgb[2]);
  }
  
@@ -3586,7 +3689,7 @@ index c202294..b280627 100644
  static void display_page(struct persistent_state *ps, ui_state *ui)
  {
    fz_display_list *dl = send(render_page, ui->eng, ps->ctx, ui->page);
-@@ -1069,6 +3329,19 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1069,6 +3432,19 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] stay-on-top %d\n", cmd.stay_on_top.status);
        break;
  
@@ -3606,7 +3709,7 @@ index c202294..b280627 100644
      case EDIT_SYNCTEX_FORWARD:
      {
        fz_buffer *buf;
-@@ -1084,11 +3357,79 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1084,11 +3460,79 @@ static void interpret_command(struct persistent_state *ps,
        else
        {
          synctex_set_target(stx, ui->page, path, cmd.synctex_forward.line);
@@ -3686,7 +3789,7 @@ index c202294..b280627 100644
      case EDIT_CROP:
      {
        txp_renderer_config *config =
-@@ -1134,6 +3475,38 @@ static void interpret_command(struct persistent_state *ps,
+@@ -1134,6 +3578,38 @@ static void interpret_command(struct persistent_state *ps,
        fprintf(stderr, "[command] rerun-once: pending immediate pass\n");
        schedule_event(SCAN_EVENT);
        break;
@@ -3725,7 +3828,7 @@ index c202294..b280627 100644
    }
  }
  
-@@ -1234,9 +3607,12 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1234,9 +3710,12 @@ bool texpresso_main(struct persistent_state *ps)
      if (doc_ext && (strcmp(doc_ext, "dvi") == 0 || strcmp(doc_ext, "xdv") == 0))
        ui->eng = txp_create_dvi_engine(ps->ctx, ps->doc_name, hooks);
      else
@@ -3738,7 +3841,7 @@ index c202294..b280627 100644
    }
  
    ui->sdl_renderer = ps->renderer;
-@@ -1349,10 +3725,19 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1349,10 +3828,19 @@ bool texpresso_main(struct persistent_state *ps)
        bool advance = !ps->paused && advance_engine(ps->ctx, ui);
        send(finish_convergence, ui->eng, ps->ctx);
        int after_page_count = send(page_count, ui->eng);
@@ -3758,7 +3861,7 @@ index c202294..b280627 100644
  
        // Fire an on-demand rerun as soon as the engine is ready, regardless of
        // idle state. Runs in the main body of the loop (not inside the idle
-@@ -1405,6 +3790,11 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1405,6 +3893,11 @@ bool texpresso_main(struct persistent_state *ps)
        {
          fprintf(stderr, "[synctex forward] sync: hit page %d, coordinates (%d, %d)\n",
                  page, x, y);
@@ -3770,7 +3873,7 @@ index c202294..b280627 100644
  
          if (page != ui->page &&
              page >= 0 && page < send(page_count, ui->eng))
-@@ -1680,6 +4070,7 @@ bool texpresso_main(struct persistent_state *ps)
+@@ -1680,6 +4173,7 @@ bool texpresso_main(struct persistent_state *ps)
            }
            if (ui->page < page_count)
              display_page(ps, ui);
