@@ -50,6 +50,8 @@
     <div class="olive-pane" hidden>
       <div class="olive-scroll" tabindex="0"><div class="olive-pages"></div></div>
       <button class="olive-insert-btn" title="Insert a blank module at the editor cursor">+ Insert</button>
+      <div class="olive-modbar" hidden></div>
+      <div class="olive-modform" hidden></div>
       <div class="olive-insert-menu" hidden></div>
       <div class="olive-progress"></div>
       <div class="olive-errors" hidden></div>
@@ -478,6 +480,7 @@ $0
     // a forced layout of the page: the animation itself restarts)
     if (caretEl.getAnimations) for (const a of caretEl.getAnimations()) a.currentTime = 0;
     if (follow) followCaret();
+    positionModBar();
   }
 
   // scroll only when the caret is out of view: then put it a third down
@@ -622,6 +625,7 @@ $0
     });
   }
   scroller.addEventListener("scroll", checkView, { passive: true });
+  scroller.addEventListener("scroll", () => positionModBar(), { passive: true });
 
   function gotoPage(n) {
     const { total } = totalShown();
@@ -992,6 +996,189 @@ $0
     caretCache.set(msg.page, files);
     if (hoverPt && hoverPt.page === msg.page) hover(hoverPt);
   }
+  // --- the module toolbar ---
+  // When the editor cursor is in a state machine, circuit, Karnaugh map or
+  // truth table, a toolbar shows near it on the page (by the caret): its
+  // buttons open small forms that write the change into the source
+  // (modedit.js has the text logic).
+  const modBar = $(".olive-modbar"), modForm = $(".olive-modform");
+  let modNow = null;            // {mod, path, offset} of the cursor's module
+  function cursorOffset(text, line, col) {
+    let a = 0;
+    for (let i = 1; i < line; i++) {
+      a = text.indexOf("\n", a);
+      if (a < 0) return -1;
+      a++;
+    }
+    return a + col;
+  }
+  function lineCol(text, off) {
+    let line = 1, ls = 0;
+    for (let i = text.indexOf("\n"); i >= 0 && i < off; i = text.indexOf("\n", i + 1)) { line++; ls = i + 1; }
+    return [line, off - ls];
+  }
+  function currentModule() {
+    const lc = lastCursor, text = lc && lastText.get(lc.path);
+    if (!text || !globalThis.OliveModEdit || !settings.on || !connected || detached) return null;
+    const offset = cursorOffset(text, lc.line, lc.column);
+    if (offset < 0) return null;
+    const mod = OliveModEdit.find(text, offset);
+    return mod && mod.actions.length ? { mod, path: lc.path, offset, text } : null;
+  }
+  function updateModBar() {
+    if (!modForm.hidden) return;              // a form is open: it stays
+    const now = currentModule();
+    const key = now && `${now.path}:${now.mod.env.begin}:${now.mod.title}:${now.mod.actions.map((a) => a.id).join()}`;
+    if (!now) { modNow = null; modBar.hidden = true; return; }
+    if (!modNow || modNow.key !== key) {
+      modBar.textContent = "";
+      const title = document.createElement("span");
+      title.className = "olive-modbar-title";
+      title.textContent = now.mod.title;
+      modBar.appendChild(title);
+      for (const a of now.mod.actions) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = a.label;
+        b.addEventListener("click", (e) => { e.stopPropagation(); openModForm(a.id); });
+        modBar.appendChild(b);
+      }
+    }
+    modNow = { ...now, key };
+    modBar.hidden = false;
+    positionModBar();
+  }
+  // above the caret's box (or the caret) on the page; at the top of the
+  // pane if the caret is not in view
+  function positionModBar() {
+    if (modBar.hidden) return;
+    const pane = $(".olive-pane").getBoundingClientRect();
+    let top = 8, left = 12;
+    const slot = caret && slots()[caret.page];
+    if (slot) {
+      const r = slot.getBoundingClientRect(), k = r.width / (+slot.dataset.w || pageSize.w);
+      const b = caret.box || [caret.x, caret.y - caret.h, caret.x, caret.y + caret.d];
+      const y = r.top + b[1] * k - pane.top, x = r.left + b[0] * k - pane.left;
+      const h = modBar.offsetHeight || 30;
+      if (y - h - 6 > 0 && y < pane.height) { top = y - h - 6; left = x; }
+      else if (y + 8 < pane.height && y > 0) { top = y + 8; left = x; }
+    }
+    left = Math.max(8, Math.min(left, pane.width - modBar.offsetWidth - 24));
+    modBar.style.top = top + "px";
+    modBar.style.left = left + "px";
+    if (!modForm.hidden) {
+      modForm.style.top = (top + modBar.offsetHeight + 4) + "px";
+      modForm.style.left = left + "px";
+    }
+  }
+  function closeModForm() {
+    modForm.hidden = true;
+    modForm.textContent = "";
+    updateModBar();
+  }
+  function modFormError(text) {
+    const e = modForm.querySelector(".olive-modform-error");
+    if (e) e.textContent = text;
+  }
+  function openModForm(id) {
+    const now = currentModule();
+    const a = now && now.mod.actions.find((x) => x.id === id);
+    if (!a) return;
+    modForm.textContent = "";
+    const head = document.createElement("div");
+    head.className = "olive-modform-head";
+    head.textContent = a.label.replace(/^\+ /, "Add ");
+    modForm.appendChild(head);
+    const inputs = {};
+    for (const f of a.fields()) {
+      if (f.type === "note") {
+        const n = document.createElement("div");
+        n.className = "olive-modform-note";
+        n.textContent = f.note;
+        modForm.appendChild(n);
+        continue;
+      }
+      const row = document.createElement("label");
+      row.className = "olive-modform-row";
+      row.append(f.label + " ");
+      let input;
+      if (f.type === "select" && !f.editable) {
+        input = document.createElement("select");
+        for (const o of f.options) {
+          const op = document.createElement("option");
+          op.value = op.textContent = o;
+          input.appendChild(op);
+        }
+        if (f.value !== undefined && f.options.includes(f.value)) input.value = f.value;
+      } else {
+        input = document.createElement("input");
+        input.type = "text";
+        input.value = f.value ?? (f.options ? f.options[0] : "");
+        if (f.options) {
+          const dl = document.createElement("datalist");
+          dl.id = "olive-dl-" + f.name;
+          for (const o of f.options) { const op = document.createElement("option"); op.value = o; dl.appendChild(op); }
+          row.appendChild(dl);
+          input.setAttribute("list", dl.id);
+        }
+      }
+      input.name = f.name;
+      inputs[f.name] = input;
+      row.appendChild(input);
+      modForm.appendChild(row);
+      if (f.note) {
+        const n = document.createElement("div");
+        n.className = "olive-modform-note";
+        n.textContent = f.note;
+        modForm.appendChild(n);
+      }
+    }
+    const err = document.createElement("div");
+    err.className = "olive-modform-error";
+    modForm.appendChild(err);
+    const buttons = document.createElement("div");
+    buttons.className = "olive-modform-buttons";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "olive-modform-ok";
+    ok.textContent = "OK";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    buttons.append(ok, cancel);
+    modForm.appendChild(buttons);
+    const submit = () => {
+      // with the text as it is now (it can have changed since the form opened)
+      const cur = currentModule();
+      const act = cur && cur.mod.kind === now.mod.kind && cur.mod.actions.find((x) => x.id === id);
+      if (!act) { err.textContent = "the cursor is no longer in this module"; return; }
+      const values = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
+      let edits;
+      try { edits = act.run(values); } catch (e) { err.textContent = e.message; return; }
+      if (!edits.length) { closeModForm(); return; }
+      const text = cur.text;
+      const out = edits.map((e) => {
+        const [l0, c0] = lineCol(text, e.from), [l1, c1] = lineCol(text, e.to);
+        return { line: l0, column: c0, toLine: l1, toColumn: c1, text: e.text, expect: text.slice(e.from, e.to) };
+      });
+      window.postMessage({ [TAG + "Cmd"]: "replace", docId, edits: out, id: "modbar" }, location.origin);
+    };
+    ok.addEventListener("click", submit);
+    cancel.addEventListener("click", closeModForm);
+    modForm.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+      else if (e.key === "Escape") { e.preventDefault(); closeModForm(); }
+      e.stopPropagation();
+    };
+    modForm.hidden = false;
+    positionModBar();
+    const first = modForm.querySelector("input, select");
+    if (first) { first.focus(); if (first.select) first.select(); }
+  }
+  document.addEventListener("mousedown", (e) => {
+    if (!modForm.hidden && !modForm.contains(e.target) && !modBar.contains(e.target)) closeModForm();
+  }, true);
+
   // --- caret prediction while typing ---
   // After a key the engine gives the caret only when it has typeset the page
   // again (some 100 ms); while one types, each key starts it again, so the
@@ -2455,6 +2642,11 @@ $0
         setStatus(`inserted; add ${msg.module} to \\usemodule{...} in the main file`, false);
       return;
     }
+    if (msg.kind === "replaced" && msg.id === "modbar") {
+      if (!msg.ok) modFormError(`not changed: ${msg.why}`);
+      else closeModForm();
+      return;
+    }
     if (msg.kind === "replaced") {
       if (!msg.ok) setStatus(`quick edit not saved: ${msg.why}`, false);
       return;
@@ -2491,6 +2683,7 @@ $0
           latency("cursor → caret (predicted)", performance.now() - (msg.t || performance.now()));
         }
       }
+      updateModBar();
       // no answer: the cursor is in text that is not on a page (yet)
       clearTimeout(caretTimer);
       caretTimer = setTimeout(() => caretEl.classList.add("olive-caret-stale"), 1500);
