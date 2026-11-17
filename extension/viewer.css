@@ -242,3 +242,17 @@
 .olive-instant { position: absolute; z-index: 3; display: flex; align-items: center; justify-content: center;
   background: #fff; color: #111; font-family: "Latin Modern Math", "STIX Two Math", "Times New Roman", serif;
   line-height: 1; pointer-events: none; box-shadow: 0 0 0 1px rgba(232,89,12,.5); }
+
+/* insert a blank module */
+.olive-insert-btn { position: absolute; top: 8px; right: 22px; z-index: 6; padding: 4px 10px;
+  font: 12px/1.3 system-ui, sans-serif; color: #fff; background: rgba(40,40,40,.75); border: 1px solid rgba(255,255,255,.25);
+  border-radius: 14px; cursor: pointer; }
+.olive-insert-btn:hover { background: rgba(20,20,20,.9); }
+.olive-insert-menu { position: absolute; top: 38px; right: 22px; z-index: 7; min-width: 190px; max-height: calc(100% - 50px);
+  overflow: auto; padding: 4px 0; background: #fff; border: 1px solid #ccc; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.3); font: 13px/1.3 system-ui, sans-serif; }
+.olive-insert-menu[hidden] { display: none; }
+.olive-insert-group { padding: 6px 12px 2px; font-size: 11px; font-weight: 600; color: #777; text-transform: uppercase; letter-spacing: .03em; }
+.olive-insert-menu button { display: block; width: 100%; text-align: left; padding: 4px 12px 4px 20px; border: 0;
+  background: none; font: inherit; color: #222; cursor: pointer; }
+.olive-insert-menu button:hover { background: #e7f0ff; }

@@ -49,6 +49,8 @@
   ui.innerHTML = `
     <div class="olive-pane" hidden>
       <div class="olive-scroll" tabindex="0"><div class="olive-pages"></div></div>
+      <button class="olive-insert-btn" title="Insert a blank module at the editor cursor">+ Insert</button>
+      <div class="olive-insert-menu" hidden></div>
       <div class="olive-progress"></div>
       <div class="olive-errors" hidden></div>
     </div>
@@ -175,6 +177,100 @@
   });
   $(".olive-off").addEventListener("click", () => { menu.hidden = true; setOn(false); });
   $(".olive-sync").addEventListener("click", () => sync(true));
+
+  // --- insert a blank module at the editor cursor ---
+  // "$0": where the cursor goes; module: the name for \usemodule
+  const BLANKS = [
+    ["Karnaugh map", [
+      ["3 variables", "kmap", String.raw`\begin{kmap}{x, y, z}
+  \minterms{$0}
+  \autoterms[0]
+\end{kmap}`],
+      ["4 variables", "kmap", String.raw`\begin{kmap}{w, x, y, z}
+  \minterms{$0}
+  \autoterms[0]
+\end{kmap}`]]],
+    ["Truth table", [
+      ["2 inputs", "truthtable", String.raw`\begin{truthtable}{x, y}{f}
+  0 & 0 & $0 \\
+  0 & 1 &  \\
+  1 & 0 &  \\
+  1 & 1 &  \\
+\end{truthtable}`],
+      ["3 inputs", "truthtable", String.raw`\begin{truthtable}{x, y, z}{f}
+  0 & 0 & 0 & $0 \\
+  0 & 0 & 1 &  \\
+  0 & 1 & 0 &  \\
+  0 & 1 & 1 &  \\
+  1 & 0 & 0 &  \\
+  1 & 0 & 1 &  \\
+  1 & 1 & 0 &  \\
+  1 & 1 & 1 &  \\
+\end{truthtable}`]]],
+    ["State machine", [
+      ["Moore", "fsm", String.raw`\begin{fsm}[moore]{i}{z}
+  \state{A}[0]{0}{0: A, 1: A}$0
+\end{fsm}
+\fsmdiagram \qquad \fsmtable`],
+      ["Mealy", "fsm", String.raw`\begin{fsm}[mealy]{i}{z}
+  \state{A}{0: A/0, 1: A/0}$0
+\end{fsm}
+\fsmdiagram \qquad \fsmtable`]]],
+    ["Circuit", [
+      ["Electric circuit", "circuit", String.raw`\begin{circuit}
+  \at{a(0,2) b(3,2) c(0,0) d(3,0)}
+  \comp{a}{b}{R}$0
+\end{circuit}`],
+      ["Logic gates", "circuit", String.raw`\begin{circuit}
+  \gate{and}{G}{a, b}$0
+  \outputs{G=f}
+\end{circuit}`]]],
+    ["Math", [
+      ["Complex plane", "cplane", String.raw`\begin{cplane}
+  $0
+\end{cplane}`],
+      ["Calculation with units", "calc", String.raw`\setvar{$0R}{1\kilo\ohm}
+\calc{U = R*1\milli\ampere}`]]],
+    ["Other", [
+      ["Code listing", "code", String.raw`\begin{lstlisting}[language=Python]
+$0
+\end{lstlisting}`],
+      ["Responsibility table", "responsibility", String.raw`\begin{responsibility}{2}{Name A & Name B}
+  1 & $0 &  \\
+\end{responsibility}`],
+      ["Figures side by side", "sidebyside", String.raw`\begin{figure}[H]
+  \begin{sidebyside}
+    \panel{\includegraphics{example-image-a}}[Left]
+    \divider
+    \panel{\includegraphics{example-image-b}}[Right]
+  \end{sidebyside}
+  \caption{$0}
+\end{figure}`]]]];
+  {
+    const btn = $(".olive-insert-btn"), menu = $(".olive-insert-menu");
+    if (detached) btn.remove();     // the editor is in the other tab
+    for (const [group, items] of BLANKS) {
+      const h = document.createElement("div");
+      h.className = "olive-insert-group";
+      h.textContent = group;
+      menu.appendChild(h);
+      for (const [label, module, text] of items) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        b.addEventListener("click", () => {
+          menu.hidden = true;
+          window.postMessage({ [TAG + "Cmd"]: "insert", text, module }, location.origin);
+        });
+        menu.appendChild(b);
+      }
+    }
+    btn.addEventListener("click", (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
+    document.addEventListener("mousedown", (e) => {
+      if (!menu.hidden && !menu.contains(e.target) && e.target !== btn) menu.hidden = true;
+    }, true);
+    menu.addEventListener("keydown", (e) => { if (e.key === "Escape") menu.hidden = true; });
+  }
   $(".olive-engine").addEventListener("change", (e) => {
     engine = e.target.value === "wsl" ? "wsl" : "browser";
     chrome.storage.local.set({ engine });     // storage.onChanged reconnects (all tabs)
@@ -2352,6 +2448,11 @@
         afterOpen = null;
         setTimeout(run, 600);   // after the goto, when the editor has the focus
       }
+      return;
+    }
+    if (msg.kind === "inserted") {
+      if (msg.usemodule === "elsewhere")
+        setStatus(`inserted; add ${msg.module} to \\usemodule{...} in the main file`, false);
       return;
     }
     if (msg.kind === "replaced") {

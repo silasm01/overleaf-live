@@ -146,6 +146,79 @@
     view.focus();
   }
 
+  // the text of a line without its comment (an unescaped %)
+  function uncommented(line) {
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === "\\") { i++; continue; }
+      if (line[i] === "%") return line.slice(0, i);
+    }
+    return line;
+  }
+
+  // text: the block, with "$0" where the cursor goes; module: the name for
+  // \usemodule (or "": none)
+  function insertBlock(text, module) {
+    const st = view.state, doc = st.doc, sel = st.selection.main;
+    const changes = [];
+    // on its own lines, never in the middle of a line: a selection is
+    // replaced; on a line with text, the block goes after the line (before
+    // it if the cursor is at its start)
+    const line = doc.lineAt(sel.from);
+    let from = sel.from, to = sel.to, before = "", after = "";
+    if (sel.empty === false || sel.from !== sel.to) {
+      const lineTo = doc.lineAt(sel.to);
+      if (/\S/.test(doc.sliceString(line.from, sel.from))) before = "\n";
+      if (/\S/.test(doc.sliceString(sel.to, lineTo.to))) after = "\n";
+    } else if (/\S/.test(line.text)) {
+      const lead = line.text.length - line.text.trimStart().length;
+      if (sel.from - line.from <= lead) { from = to = line.from; after = "\n"; }
+      else { from = to = line.to; before = "\n"; }
+    }
+    let block = before + text + after;
+    let caret = block.indexOf("$0");
+    block = block.replace("$0", "");
+    if (caret < 0) caret = block.length;
+    changes.push({ from, to, insert: block });
+    // \usemodule
+    let usemodule = "none";
+    if (module) {
+      let found = null, setup = null, begin = null;
+      for (let n = 1; n <= doc.lines; n++) {
+        const l = doc.line(n), t = uncommented(l.text);
+        if (!found) {
+          const m = /\\usemodule\s*\{([^}]*)\}/.exec(t);
+          if (m) found = { line: l, m };
+        }
+        if (!setup && /\\input\s*\{\s*setup(\.tex)?\s*\}/.test(t)) setup = l;
+        if (!begin && /\\begin\s*\{document\}/.test(t)) { begin = l; break; }
+      }
+      if (found) {
+        const names = found.m[1].split(",").map((x) => x.trim()).filter(Boolean);
+        if (names.includes(module)) usemodule = "loaded";
+        else {
+          // before the closing brace of \usemodule{...}
+          const close = found.line.from + found.m.index + found.m[0].length - 1;
+          changes.push({ from: close, to: close, insert: (names.length ? ", " : "") + module });
+          usemodule = "added";
+        }
+      } else if (setup) {
+        changes.push({ from: setup.to, to: setup.to, insert: `\n\\usemodule{${module}}` });
+        usemodule = "added";
+      } else if (begin) {
+        changes.push({ from: begin.from, to: begin.from, insert: `\\usemodule{${module}}\n` });
+        usemodule = "added";
+      } else usemodule = "elsewhere";      // not the main file
+    }
+    // the cursor: in the block, after the changes (a \usemodule edit is
+    // before the block, in the preamble)
+    changes.sort((a, b) => a.from - b.from);
+    let shift = 0;
+    for (const c of changes) if (c.from < from) shift += c.insert.length - (c.to - c.from);
+    view.dispatch({ changes, selection: { anchor: from + shift + caret }, scrollIntoView: true });
+    view.focus();
+    return { ok: true, usemodule };
+  }
+
   window.addEventListener("message", (evt) => {
     if (evt.source !== window || !evt.data) return;
     const cmd = evt.data[TAG + "Cmd"];
@@ -164,6 +237,13 @@
     }
     if (cmd === "goto" && evt.data.docId === docId)
       gotoPosition(evt.data.line, evt.data.column, evt.data.toLine, evt.data.toColumn);
+    // insert a blank module at the cursor (on its own lines), and load the
+    // module with \usemodule if this file does not load it yet
+    if (cmd === "insert" && view) {
+      const d = evt.data;
+      const r = insertBlock(String(d.text || ""), String(d.module || ""));
+      post({ kind: "inserted", ...r, module: d.module });
+    }
     // quick edit: replace a field, if it still has the text it had
     if (cmd === "replace") {
       const d = evt.data;
