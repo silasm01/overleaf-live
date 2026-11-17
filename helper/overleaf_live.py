@@ -305,6 +305,9 @@ class Project:
                     caret["box"] = [float(v) for v in m[6].split()]
                 if m[7]:
                     caret["element"] = True
+                # the cursor message it answers (the last one sent before)
+                if getattr(self, "cursor_seq", None) is not None:
+                    caret["seq"] = self.cursor_seq
                 await self.send(caret)
                 continue
             if line.startswith("(synctex-debug "):
@@ -565,6 +568,8 @@ class Project:
             return
         line = max(1, int(msg.get("line", 1)))
         column = max(0, int(msg.get("column", 0)))
+        if "seq" in msg:
+            self.cursor_seq = int(msg["seq"])
         await self.command(f"(synctex-forward {sexp_string(str(target))} {line} {column})")
 
     async def on_scan(self, ws, msg):

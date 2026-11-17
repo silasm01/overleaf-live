@@ -26,6 +26,9 @@
     // t: when the first change of this message was made (latency, debug panel)
     if (view && docId) post({ kind: "doc", docId, text: view.state.doc.toString(), t: firstChange || lastSent });
     firstChange = 0;
+    // the cursor of the change, directly after its text (the messages keep
+    // their order, so the engine searches the new text)
+    if (cursorPending) { cursorPending = false; sendCursor(); }
   }
 
   // the first change goes at once; more changes in quick succession (40 ms)
@@ -51,13 +54,12 @@
     cursorAt = 0;
   }
 
-  // after a change: after the text (40 ms), so that TeXpresso searches the
-  // new text; a move only: at once
-  let cursorAt = 0;
-  function scheduleCursor(changed) {
+  // at once; while a text message waits (40 ms batch): directly after it
+  let cursorAt = 0, cursorPending = false;
+  function scheduleCursor() {
     if (!cursorAt) cursorAt = performance.now();
     clearTimeout(cursorTimer);
-    if (changed || timer) cursorTimer = setTimeout(sendCursor, 90);
+    if (timer) cursorPending = true;
     else sendCursor();
   }
 
@@ -74,7 +76,7 @@
           update(u) {
             view = u.view;
             if (u.docChanged) schedule();
-            if (u.docChanged || u.selectionSet) scheduleCursor(u.docChanged);
+            if (u.docChanged || u.selectionSet) scheduleCursor();
           },
           destroy() {
             if (view === v) view = null;

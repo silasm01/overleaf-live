@@ -34,6 +34,7 @@
   let caret = null;              // {page, x, y, h, d} in points, from the helper
   let lastCursorMove = 0;        // when the editor cursor last moved
   let caretTimer = null;
+  let cursorSeq = 0;             // cursor messages sent (the engine's caret answers name theirs)
   let lastCursor = null;         // {path, line, column}: the editor cursor last sent
   let pendingGoto = null;        // reverse search waiting for a file to open
   let afterOpen = null;          // { path, run }: to do when that file is open (quick edit)
@@ -895,6 +896,78 @@
     caretCache.set(msg.page, files);
     if (hoverPt && hoverPt.page === msg.page) hover(hoverPt);
   }
+  // --- caret prediction while typing ---
+  // After a key the engine gives the caret only when it has typeset the page
+  // again (some 100 ms); while one types, each key starts it again, so the
+  // caret would stand still. So the caret is predicted from the last known
+  // carets of the cursor's line: a column whose text before it did not
+  // change keeps its place; after it, each character adds about one
+  // character width. The engine's answer then replaces the prediction.
+  let predBase = null;
+  function lineOf(text, n) {
+    let a = 0;
+    for (let i = 1; i < n; i++) {
+      a = text.indexOf("\n", a);
+      if (a < 0) return null;
+      a++;
+    }
+    const b = text.indexOf("\n", a);
+    return b < 0 ? text.slice(a) : text.slice(a, b);
+  }
+  function lineCount(text) {
+    let n = 1;
+    for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) n++;
+    return n;
+  }
+  function commonPrefix(a, b) {
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    return i;
+  }
+  // a known caret (from the engine or the cache) for lastCursor
+  function setPredBase(pos) {
+    const lc = lastCursor, text = lc && lastText.get(lc.path);
+    if (!text || !pos || pos.element || pos.box || !(pos.h + pos.d > 0.5)) { predBase = null; return; }
+    const lineText = lineOf(text, lc.line), count = lineCount(text);
+    if (lineText === null) { predBase = null; return; }
+    const map = new Map();
+    let maxX = null;
+    const files = caretCache.get(pos.page), cols = files && files.get(lc.path) && files.get(lc.path).get(lc.line);
+    if (cols) for (const [c, v] of cols) map.set(c, v);
+    if (files) for (const lines of files.values()) for (const cs of lines.values()) for (const v of cs.values()) maxX = Math.max(maxX ?? v[0], v[0]);
+    const old = predBase;
+    if (old && old.path === lc.path && old.line === lc.line && old.count === count && old.page === pos.page) {
+      // the carets of the old base before the first change are still right
+      const p = commonPrefix(old.lineText, lineText);
+      for (const [c, v] of old.map) if (c <= p && !map.has(c)) map.set(c, v);
+      if (maxX === null) maxX = old.maxX;
+    }
+    map.set(lc.column, [pos.x, pos.y, pos.h, pos.d]);
+    predBase = { path: lc.path, line: lc.line, lineText, count, page: pos.page, map, maxX };
+  }
+  function predictCaret(path, line, col) {
+    const b = predBase, text = lastText.get(path);
+    if (!b || b.path !== path || b.line !== line || !text || lineCount(text) !== b.count) return null;
+    const cur = lineOf(text, line);
+    if (cur === null) return null;
+    const p = commonPrefix(b.lineText, cur);
+    // the known carets that are still right: before the first change
+    const pts = [...b.map].filter(([c]) => c <= p).sort((u, v) => u[0] - v[0]);
+    if (!pts.length) return null;
+    // one character's width: from the known carets on the same line
+    const y0 = pts[pts.length - 1][1][1], same = pts.filter(([, v]) => Math.abs(v[1] - y0) < 1);
+    let w = 0.5 * (pts[0][1][2] + pts[0][1][3]);
+    if (same.length > 1) {
+      const [c0, v0] = same[0], [c1, v1] = same[same.length - 1];
+      if (c1 > c0 && v1[0] > v0[0]) w = (v1[0] - v0[0]) / (c1 - c0);
+    }
+    let base = pts.filter(([c]) => c <= col).pop() || pts[0];
+    const [c, v] = base;
+    let x = v[0] + (col - c) * w;
+    if (b.maxX !== null && x > b.maxX) x = b.maxX;
+    return { page: b.page, x, y: v[1], h: v[2], d: v[3], predicted: true };
+  }
+
   // the caret of a cursor position from the cache (only an exact column),
   // or null
   function cachedCaret(path, line, col) {
@@ -1478,7 +1551,7 @@
     const fields = new Map(), fieldsAsked = new Map();
     // what the debug shows, kept per project (also when the panel is closed)
     const debugKey = "debug:" + projectId;
-    const dstate = { map: false, wholePage: false, elements: false, colorBy: "level", instant: false,
+    const dstate = { map: false, wholePage: false, elements: false, colorBy: "level", instant: false, predict: true,
                      show: { top: true, mid: true, leaf: true, normal: true, special: true } };
     function saveDebug() {
       dstate.map = mapOn; dstate.wholePage = wholePage; dstate.elements = elementsOn;
@@ -1518,6 +1591,11 @@
             (normal: an edit box; special: a menu, a value list or a name); the engine checks every
             character of the page. The panel can close; what it shows stays, also after a reload.</div>
           <div class="olive-debug-elinfo"></div>
+        </section>
+        <section>
+          <label><input type="checkbox" class="olive-debug-predict"> Predict the caret while typing</label>
+          <div class="olive-debug-note">After a key, the caret moves at once by about one character
+            width; the engine's answer then puts it in its exact place.</div>
         </section>
         <section>
           <label><input type="checkbox" class="olive-debug-instant"> Instant feedback (test)</label>
@@ -1562,6 +1640,8 @@
         });
         types.appendChild(l);
       }
+      q(".olive-debug-predict").checked = dstate.predict !== false;
+      q(".olive-debug-predict").addEventListener("change", (e) => { dstate.predict = e.target.checked; saveDebug(); });
       q(".olive-debug-instant").checked = !!dstate.instant;
       q(".olive-debug-instant").addEventListener("change", (e) => { dstate.instant = e.target.checked; saveDebug(); });
       q(".olive-debug-colorby").value = dstate.colorBy;
@@ -1618,7 +1698,7 @@
       if (wholePage) refresh();
       else if (lastCursor) {
         sentAt = performance.now();
-        send({ type: "cursor", ...lastCursor });
+        send({ type: "cursor", seq: ++cursorSeq, ...lastCursor });
       }
     }
 
@@ -1647,7 +1727,7 @@
       for (const p of [...new Set([...elLayers.keys(), ...els.keys(), ...fields.keys()])]) dropElements(p);
       send({ type: "caretDebug", on: mapOn && !wholePage });
       if ((mapOn && wholePage) || elementsOn) refresh();
-      else if (mapOn && lastCursor) send({ type: "cursor", ...lastCursor });
+      else if (mapOn && lastCursor) send({ type: "cursor", seq: ++cursorSeq, ...lastCursor });
     }
 
     // --- timings (debug panel) ---
@@ -1988,7 +2068,8 @@
     return { map, elements, pageFields, timing, resume, caret, cursor, log, clearMap, clearElements, pageUpdated,
       redraw, view: viewChanged,
       get lineMapOn() { return mapOn && !wholePage; },
-      get instant() { return !!dstate.instant; } };
+      get instant() { return !!dstate.instant; },
+      get predict() { return dstate.predict !== false; } };
   })();
 
   // --- connection ---------------------------------------------------
@@ -2086,6 +2167,8 @@
         showErrors(msg.items || msg.lines.map((t) => ({ text: t, file: null, line: 0 })));
         break;
       case "caret":
+        // an answer for an older cursor (the newer one is on its way): not shown
+        if (msg.seq !== undefined && msg.seq < cursorSeq) break;
         clearTimeout(caretTimer);
         dbg.caret(msg);
         if (!(msg.h + msg.d > 0.5)) {
@@ -2097,8 +2180,11 @@
         // the cached caret and the engine's: the same? (debug panel)
         if (caret && caret.cached && caret.page === msg.page)
           latency("cache vs engine caret", 0, Math.hypot(caret.x - msg.x, caret.y - msg.y) < 1 ? "same" : "different");
+        if (caret && caret.predicted && caret.page === msg.page)
+          latency("predicted vs engine caret", 0, Math.hypot(caret.x - msg.x, caret.y - msg.y) < 1.5 ? "same" : "different");
         caret = msg;
         placeCaret(Date.now() - lastCursorMove < 3000);
+        setPredBase(msg);
         if (cursorAt) {
           latency("cursor → caret", performance.now() - cursorAt, cursorCached ? "cache, then engine" : "engine");
           cursorAt = 0;
@@ -2284,17 +2370,25 @@
       lastCursorMove = Date.now();
       lastCursor = { path, line: msg.line, column: msg.column };
       dbg.cursor(lastCursor);
-      send({ type: "cursor", path, line: msg.line, column: msg.column });
+      send({ type: "cursor", seq: ++cursorSeq, path, line: msg.line, column: msg.column });
       // the caret at once from the cache (the engine's answer corrects it)
       const cached = cachedCaret(path, msg.line, msg.column);
       cursorCached = !!cached;
       if (cached) {
         caret = Object.assign(cached, { cached: true });
         placeCaret(true);
+        setPredBase(caret);
         latency("cursor → caret (cache)", performance.now() - (msg.t || performance.now()));
         cursorAt = 0;
       } else {
         cursorAt = msg.t || performance.now();
+        // while typing: the predicted caret (the engine's answer replaces it)
+        const pred = dbg.predict ? predictCaret(path, msg.line, msg.column) : null;
+        if (pred) {
+          caret = pred;
+          placeCaret(true);
+          latency("cursor → caret (predicted)", performance.now() - (msg.t || performance.now()));
+        }
       }
       // no answer: the cursor is in text that is not on a page (yet)
       clearTimeout(caretTimer);

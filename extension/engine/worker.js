@@ -164,7 +164,8 @@ const P = {
   luaNoted: false,
   feedback: new Map(),       // rel path -> bytes: outputs given back (second pass)
   overleafBbl: null,         // the .bbl of Overleaf's last compile (for biblatex)
-  cacheQueue: [],            // pages for page-cache (when the pages in view are done)
+  cacheQueue: [],
+  cursorSeq: undefined,       // the last cursor message (its seq) sent to the engine            // pages for page-cache (when the pages in view are done)
   lastActivity: 0,           // performance.now() of the last edit or view change
 };
 
@@ -558,6 +559,9 @@ function onLine(run, line) {
     const caret = { type: 'caret', page: +m[1], x: +m[2], y: +m[3], h: +m[4], d: +m[5] };
     if (m[6]) caret.box = m[6].trim().split(' ').map(Number);
     if (m[7]) caret.element = true;
+    // the cursor message it answers: the last one before the engine wrote it
+    // (an answer for an older cursor can arrive after a newer one was sent)
+    caret.seq = P.cursorSeq;
     send(caret);
   } else if (line.startsWith('(synctex-debug ')) {
     send(parseCaretDebug(line));
@@ -818,6 +822,7 @@ const handlers = {
   cursor(client, msg) {
     const rel = safeRel(msg.path || '');
     if (!rel || !P.run) return;
+    if (msg.seq !== undefined) P.cursorSeq = msg.seq;
     command(`(synctex-forward ${sexpString(`${PROJECT}/${rel}`)} ${Math.max(1, msg.line | 0)} ${Math.max(0, msg.column | 0)})`);
   },
   scan(client, msg) {
