@@ -41,6 +41,7 @@
   let pendingField = null;       // quick edit: the field of the last double-click
   let scanPage = -1;             // the page of the last double-click
   let docId = null;              // the file open in the editor (Overleaf's id)
+  let heldInfo = null, lastRemoteAt = 0, releaseCheck = null;   // collaborators' edits (page.js holds them)
   let engine = "browser";        // "browser" (WebAssembly) or "wsl" (the helper); for all projects
 
   // --- the viewer and the Live button ---------------------------------
@@ -68,6 +69,7 @@
         <label class="olive-menu-lua" title="WSL helper: runs a normal XeLaTeX compile with shell escape on your PC for calc/fsm results. Shell escape can run any command: turn on only for projects you trust. In the browser engine, Lua results are always on (a Lua sandbox, no shell).">
           <input type="checkbox" class="olive-lua"> Lua results (shell escape)</label>
         <div class="olive-menu-buttons">
+          <button class="olive-held" hidden title="Collaborators' edits wait until they are stable (2 s without typing, balanced braces and environments). Show them now.">Show collaborator edits now</button>
           <button class="olive-sync" title="Send all project files again">Sync files</button>
           <button class="olive-off">Turn off Live</button>
         </div>
@@ -92,7 +94,9 @@
       else if (errors.length) { state = "error"; label = `Live · ${errors.length} error${errors.length > 1 ? "s" : ""}`; }
       else if (status.busy) { state = "busy"; label = `Live · ${status.text}`; }
       else { state = "ok"; label = "Live"; }
+      if (heldInfo && heldInfo.n) label += heldInfo.unbalanced ? " · collaborator edit held (unbalanced)" : " · collaborator edit held";
     }
+    $(".olive-held").hidden = !(settings.on && heldInfo && heldInfo.n);
     $(".olive-label").textContent = label;
     toggle.dataset.state = state;
     toggle.title = settings.on ? status.text : "Live preview by TeXpresso on your PC";
@@ -179,6 +183,33 @@
   });
   $(".olive-off").addEventListener("click", () => { menu.hidden = true; setOn(false); });
   $(".olive-sync").addEventListener("click", () => sync(true));
+  $(".olive-held").addEventListener("click", () => window.postMessage({ [TAG + "Cmd"]: "releaseHeld" }, location.origin));
+
+  // --- collaborators ---
+  // page.js holds their edits until they are stable (see there); after a
+  // release, a new error in the released lines (in 10 s) holds them again.
+  function errorKey(it) { return `${it.file}:${it.line}:${it.text}`; }
+  function checkRelease(items) {
+    const r = releaseCheck;
+    if (!r || performance.now() > r.until) { releaseCheck = null; return; }
+    const bad = items.find((it) => !r.base.has(errorKey(it)) && it.file === r.path &&
+      r.lines.some(([a, b]) => it.line >= a - 1 && it.line <= b + 1));
+    if (!bad) return;
+    releaseCheck = null;
+    window.postMessage({ [TAG + "Cmd"]: "rejectRelease", docId: r.docId }, location.origin);
+    setStatus(`a collaborator's edit gives an error (line ${bad.line}): held until it is fixed`, false);
+  }
+  // the other files (not open here) that collaborators change come only with
+  // the project zip: every 2 minutes while collaborators are active (Overleaf
+  // limits downloads: at most 30 an hour), quietly
+  let autoSyncFails = 0;
+  setInterval(() => {
+    const active = Date.now() - lastRemoteAt < 10 * 60 * 1000 ||
+      !!document.querySelector('[class*="online-user"]:not(:empty)');
+    if (!settings.on || !connected || detached || document.visibilityState !== "visible" || !active) return;
+    if (autoSyncFails > 0) { autoSyncFails--; return; }    // after a failure: wait longer
+    sync(true, true);
+  }, 2 * 60 * 1000);
 
   // --- insert a blank module at the editor cursor ---
   // "$0": where the cursor goes; module: the name for \usemodule
@@ -378,14 +409,46 @@ $0
     while (slots().length > n) pages.lastChild.remove();
   }
 
+  // Pages that an error took away (e.g. an open brace, a missing package:
+  // no pages at all) stay, dimmed, as the last good version, until the
+  // pages come again. A document that only became shorter (no new error)
+  // loses them.
+  let acceptedErrors = null, acceptedCount = 0, shrinkTimer = 0, lastErrorItems = [];
   function updateSlots() {
     if (done) knownTotal = pageCount;
     const want = done ? pageCount : pageCount + 1;
     // pages go away only when the document is finished (TeXpresso starts
     // again from page 1 for its second pass)
-    setSlotCount(done ? want : Math.max(want, slots().length));
+    clearTimeout(shrinkTimer);
+    shrinkTimer = 0;
+    if (done && want < slots().length && pageCount > 0) {
+      // the errors of this run can come just after the count
+      shrinkTimer = setTimeout(settleShrink, 400);
+    } else {
+      setSlotCount(Math.max(want, Math.min(slots().length, done ? Math.max(acceptedCount, want) : Infinity)));
+      if (done) settleShrink();
+    }
     if (caret && !caretEl.parentElement) placeCaret(false);
     writeToolbar();
+    checkView();
+  }
+  function settleShrink() {
+    shrinkTimer = 0;
+    if (!done) return;
+    const key = errors.join("\n");
+    // no pages at all (e.g. an open brace, a missing package), or fewer pages
+    // with a new error: the pages of the last good version stay
+    const broken = acceptedErrors !== null && acceptedCount > 0 &&
+      (pageCount === 0 || (pageCount < acceptedCount && errors.length > 0 && key !== acceptedErrors));
+    if (broken) {
+      setSlotCount(Math.max(pageCount, acceptedCount));
+      [...slots()].forEach((s, i) => s.classList.toggle("olive-slot-stale", i >= pageCount));
+    } else {
+      setSlotCount(pageCount);
+      for (const s of slots()) s.classList.remove("olive-slot-stale");
+      acceptedErrors = key;
+      acceptedCount = pageCount;
+    }
     checkView();
   }
 
@@ -2423,6 +2486,7 @@ $0
           applyZoom();
         }
         updateSlots();
+        if (slots()[msg.page]) slots()[msg.page].classList.remove("olive-slot-stale");
         dbg.pageUpdated(msg.page);
         pageChanged(msg.page);
         if (msg.page >= view.first && msg.page <= view.last) {
@@ -2446,6 +2510,9 @@ $0
         break;
       case "errors":
         errors = msg.lines;
+        lastErrorItems = msg.items || [];
+        checkRelease(lastErrorItems);
+        if (done && !shrinkTimer) settleShrink();
         showStatus();
         showErrors(msg.items || msg.lines.map((t) => ({ text: t, file: null, line: 0 })));
         break;
@@ -2569,15 +2636,16 @@ $0
   // --- project files --------------------------------------------------
   // The zip download is limited by Overleaf (10 a minute): at most one
   // every 10 seconds; a later request waits.
-  function sync(now) {
+  function sync(now, quiet) {
     if (!connected) return;
     const wait = lastSync + 10000 - Date.now();
     if (wait > 0) {
+      if (quiet) return;
       if (!syncTimer) syncTimer = setTimeout(() => { syncTimer = null; sync(true); }, wait);
       return;
     }
     lastSync = Date.now();
-    setStatus("sending project files…", true);
+    if (!quiet) setStatus("sending project files…", true);
     fetch(`/Project/${projectId}/download/zip`, { credentials: "include" })
       .then((r) => {
         if (!r.ok) throw new Error("HTTP " + r.status);
@@ -2589,7 +2657,10 @@ $0
         lastText.clear();
         window.postMessage({ [TAG + "Cmd"]: "resend" }, location.origin);
       })
-      .catch((e) => setStatus("could not get the project files: " + e.message, false));
+      .catch((e) => {
+        if (quiet) { autoSyncFails = 3; return; }
+        setStatus("could not get the project files: " + e.message, false);
+      });
   }
 
   function toBase64(bytes) {
@@ -2635,6 +2706,18 @@ $0
         afterOpen = null;
         setTimeout(run, 600);   // after the goto, when the editor has the focus
       }
+      return;
+    }
+    if (msg.kind === "remote") { lastRemoteAt = Date.now(); return; }
+    if (msg.kind === "held") {
+      heldInfo = msg.n ? msg : null;
+      showStatus();
+      return;
+    }
+    if (msg.kind === "released") {
+      if (msg.forced) { releaseCheck = null; return; }   // shown on request: kept, even with an error
+      releaseCheck = { docId: msg.docId, path: pathOf(msg.docId), lines: msg.lines, until: performance.now() + 10000,
+                       base: new Set(lastErrorItems.map(errorKey)) };
       return;
     }
     if (msg.kind === "inserted") {

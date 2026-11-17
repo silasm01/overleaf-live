@@ -24,7 +24,7 @@
     timer = null;
     lastSent = performance.now();
     // t: when the first change of this message was made (latency, debug panel)
-    if (view && docId) post({ kind: "doc", docId, text: view.state.doc.toString(), t: firstChange || lastSent });
+    if (view && docId) post({ kind: "doc", docId, text: engineDoc().toString(), t: firstChange || lastSent });
     firstChange = 0;
     // the cursor of the change, directly after its text (the messages keep
     // their order, so the engine searches the new text)
@@ -45,8 +45,9 @@
   function sendCursor(force) {
     cursorTimer = null;
     if (!view || !docId) return;
-    const pos = view.state.selection.main.head;
-    const line = view.state.doc.lineAt(pos);
+    // (in the engine's text: without the collaborators' edits that are held)
+    const pos = toEngine(view.state.selection.main.head);
+    const line = engineDoc().lineAt(pos);
     const key = `${docId}:${line.number}:${pos - line.from}`;
     if (key === lastCursor && !force) { cursorAt = 0; return; }
     lastCursor = key;
@@ -63,6 +64,123 @@
     else sendCursor();
   }
 
+  // --- collaborators' edits: held until they are stable ---
+  // A change by another person (CodeMirror's Transaction.remote, which
+  // Overleaf sets on changes from its server) does not go to the engine at
+  // once: half-typed LaTeX from a collaborator would give errors (or no
+  // pages) on this side. The engine has a copy of the text (shadow) without
+  // the held changes (pending: shadow -> editor text); this user's own
+  // changes go into the copy at once (moved over the held ones). The held
+  // changes go to the engine when the collaborator has stopped for 2 s and
+  // braces, \begin/\end and $ are as balanced as before; if they then give
+  // a new error in their lines (content.js), they are held again.
+  const HOLD_MS = 2000;
+  let held = null;            // {shadow: Text, pending: ChangeSet, timer}
+  let lastRelease = null;     // {shadow, pending, localSince} of the last release
+  const engineDoc = () => held ? held.shadow : view.state.doc;
+  const toEngine = (pos) => held ? held.pending.invertedDesc.mapPos(pos) : pos;
+  const toEditor = (pos) => held ? held.pending.mapPos(pos) : pos;
+  function isRemote(tr) {
+    try { return tr.annotation(tr.constructor.remote) === true; } catch (e) { return false; }
+  }
+  function postHeld() {
+    let n = 0, lines = [];
+    if (held) held.pending.iterChangedRanges((fA, tA, fB, tB) => {
+      n++;
+      const doc = view.state.doc;
+      lines.push([doc.lineAt(fB).number, doc.lineAt(Math.min(tB, doc.length)).number]);
+    });
+    post({ kind: "held", docId, n, lines });
+  }
+  function onTransactions(trs) {
+    let remote = false;
+    for (const tr of trs) {
+      if (!tr.docChanged) continue;
+      if (isRemote(tr)) {
+        remote = true;
+        if (!held) held = { shadow: tr.startState.doc, pending: tr.changes, timer: 0 };
+        else held.pending = held.pending.compose(tr.changes);
+        continue;
+      }
+      if (lastRelease) lastRelease.localSince = true;
+      if (!held) continue;
+      // an edit in the held text itself: no copy without it; all to the engine
+      let overlap = false;
+      held.pending.iterChangedRanges((fA, tA, fB, tB) => {
+        tr.changes.iterChangedRanges((a, b) => { if (a <= tB && b >= fB) overlap = true; });
+      });
+      if (overlap) { dropHeld(); continue; }
+      // this user's change, moved over the held ones, into the copy
+      const inv = held.pending.invert(held.shadow);        // editor -> shadow
+      const mine = tr.changes.map(inv);                    // on the shadow
+      const invAfter = inv.map(tr.changes);                // new editor text -> new shadow
+      held.shadow = mine.apply(held.shadow);
+      held.pending = invAfter.invert(tr.state.doc);
+    }
+    if (remote) post({ kind: "remote" });
+    if (remote && held) {
+      clearTimeout(held.timer);
+      held.timer = setTimeout(() => release(false), HOLD_MS);
+      postHeld();
+    }
+  }
+  function dropHeld() {
+    if (!held) return;
+    clearTimeout(held.timer);
+    held = null;
+    postHeld();
+  }
+  // braces, environments and $ of a text: as a key (the same before and
+  // after a change: the change keeps them balanced)
+  function balance(text) {
+    let brace = 0, dollar = 0;
+    const env = new Map();
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (c === "%") { const e = text.indexOf("\n", i); if (e < 0) break; i = e; continue; }
+      if (c === "\\") {
+        const m = /^\\(begin|end)\s*\{([^}]*)\}/.exec(text.slice(i, i + 60));
+        if (m) { env.set(m[2], (env.get(m[2]) || 0) + (m[1] === "begin" ? 1 : -1)); i += m[0].length - 1; }
+        else i++;
+        continue;
+      }
+      if (c === "{") brace++;
+      else if (c === "}") brace--;
+      else if (c === "$") dollar++;
+    }
+    return `${brace} ${dollar % 2} ` + [...env].filter(([, v]) => v).sort().map(([k, v]) => k + ":" + v).join(",");
+  }
+  function release(force) {
+    if (!held || !view) return;
+    if (!force && balance(view.state.doc.toString()) !== balance(held.shadow.toString())) {
+      post({ kind: "held", docId, n: 1, unbalanced: true, lines: [] });
+      return;           // the next remote change starts the wait again
+    }
+    const lines = [];
+    held.pending.iterChangedRanges((fA, tA, fB, tB) => {
+      const doc = view.state.doc;
+      lines.push([doc.lineAt(fB).number, doc.lineAt(Math.min(tB, doc.length)).number]);
+    });
+    lastRelease = { shadow: held.shadow, pending: held.pending, localSince: false, at: performance.now() };
+    clearTimeout(held.timer);
+    held = null;
+    post({ kind: "released", docId, lines, forced: !!force });
+    postHeld();
+    schedule();
+    scheduleCursor();
+  }
+  // the released changes gave a new error: hold them again (if this user
+  // did not edit since; later remote changes stay held with them)
+  function rejectRelease() {
+    const r = lastRelease;
+    if (!r || r.localSince || !view) return;
+    lastRelease = null;
+    held = { shadow: r.shadow, pending: held ? r.pending.compose(held.pending) : r.pending, timer: 0 };
+    postHeld();
+    schedule();
+    scheduleCursor();
+  }
+
   window.addEventListener("UNSTABLE_editor:extensions", (evt) => {
     const { CodeMirror, extensions } = evt.detail || {};
     if (!CodeMirror || !CodeMirror.ViewPlugin || !extensions) return;
@@ -75,6 +193,7 @@
         return {
           update(u) {
             view = u.view;
+            if (u.docChanged && u.transactions) onTransactions(u.transactions);
             if (u.docChanged) schedule();
             if (u.docChanged || u.selectionSet) scheduleCursor();
           },
@@ -89,6 +208,8 @@
   // the file that was opened (Overleaf's id for it)
   window.addEventListener("doc:after-opened", (evt) => {
     docId = evt.detail && evt.detail.docId;
+    if (held) { clearTimeout(held.timer); held = null; }
+    lastRelease = null;
     post({ kind: "opened", docId });
     schedule();
     scheduleCursor();
@@ -124,11 +245,12 @@
     return result;
   };
 
-  // line/column (line from 1) -> offset in the document
+  // line/column (line from 1) in the engine's text -> offset in the editor
+  // (with held collaborators' edits, the two differ)
   function offsetOf(line, column) {
-    const doc = view.state.doc;
+    const doc = engineDoc();
     const l = doc.line(Math.max(1, Math.min(line, doc.lines)));
-    return Math.min(l.from + Math.max(0, column), l.to);
+    return toEditor(Math.min(l.from + Math.max(0, column), l.to));
   }
 
   // move the cursor to line/column and show it (reverse search); with
@@ -235,6 +357,8 @@
         key: "z", code: "KeyZ", ctrlKey: !mac, metaKey: mac, shiftKey: cmd === "redo",
         bubbles: true, cancelable: true }));
     }
+    if (cmd === "releaseHeld") release(true);
+    if (cmd === "rejectRelease" && evt.data.docId === docId) rejectRelease();
     if (cmd === "goto" && evt.data.docId === docId)
       gotoPosition(evt.data.line, evt.data.column, evt.data.toLine, evt.data.toColumn);
     // insert a blank module at the cursor (on its own lines), and load the

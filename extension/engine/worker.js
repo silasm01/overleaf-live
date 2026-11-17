@@ -759,15 +759,26 @@ const handlers = {
     if (!P.run) status('waiting for the project files', true);
   },
   async project(client, msg) {
+    const old = P.files;
     P.files = await unzip(fromBase64(msg.zip));
     log(`project ${P.id}: ${P.files.size} files`);
     if (P.run) {
-      for (const [rel, data] of P.files) writeProjectFile(rel, data);
+      // only the files that changed (the zip comes again every few minutes
+      // while collaborators work)
+      const same = (a, b) => a && b && a.length === b.length && a.every((x, i) => x === b[i]);
+      let changed = 0, picture = false;
+      for (const [rel, data] of P.files) {
+        if (same(old.get(rel), data)) continue;
+        writeProjectFile(rel, data);
+        changed++;
+        if (!/\.(tex|sty|cls|bib|bbx|cbx|lua|txt|cfg|def|clo|ltx)$/i.test(rel)) picture = true;
+      }
+      if (!changed) { status('project files up to date', false); return; }
       // a picture file can change a page without changing its DVI code:
-      // all pages are drawn again (if they changed)
-      command(`(export-png ${sexpString(EXPORT)} ${P.width})`);
+      // then all pages are drawn again (if they changed)
+      if (picture) command(`(export-png ${sexpString(EXPORT)} ${P.width})`);
       command('(rescan)');
-      status('project files updated', false);
+      status(`project files updated (${changed})`, false);
     } else {
       await start();
     }
