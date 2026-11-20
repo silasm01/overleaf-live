@@ -282,3 +282,13 @@
 .olive-slot-stale::after { content: "Last good version (the document has an error)"; position: absolute; top: 8px;
   left: 50%; transform: translateX(-50%); z-index: 2; padding: 3px 10px; border-radius: 12px; background: #c92a2a;
   color: #fff; font: 12px/1.3 system-ui, sans-serif; white-space: nowrap; pointer-events: none; }
+
+/* Report a problem: the form */
+.olive-report { position: absolute; top: 40px; right: 12px; z-index: 30; width: 320px; padding: 10px 12px;
+  background: #fff; color: #222; border: 1px solid #bbb; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
+  font: 13px/1.4 system-ui, sans-serif; display: flex; flex-direction: column; gap: 6px; }
+.olive-report-note { color: #555; font-size: 12px; }
+.olive-report textarea { width: 100%; box-sizing: border-box; font: inherit; resize: vertical; }
+.olive-report-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.olive-report-buttons button { padding: 3px 10px; border: 1px solid #bbb; border-radius: 4px; background: #f5f5f5; cursor: pointer; }
+.olive-report-save { background: #138a07 !important; color: #fff; border-color: #138a07 !important; }

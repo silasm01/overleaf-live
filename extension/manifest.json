@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Overleaf Live (TeXpresso)",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "description": "Live preview for Overleaf, typeset by TeXpresso in your browser (WebAssembly) or on your PC (WSL helper).",
   "icons": {
     "16": "icons/icon16.png",

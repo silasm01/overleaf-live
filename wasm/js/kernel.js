@@ -17,6 +17,9 @@
 'use strict';
 
 const PAGE = 65536;
+// exit status of the engine's abort() (lib-engine.js / build-engine.sh: the
+// engine's abort throws ExitStatus(134) and does not stop the WASM module)
+const ABORT_STATUS = 134;
 // js/pagestore.wat, assembled (wasm-as --enable-simd --enable-multimemory --enable-bulk-memory)
 const PAGESTORE_WASM = 'AGFzbQEAAAABEQNgAn9/AGACf38Bf2ABfwF/AgwBA2VudgNlbmcCAAEDBQQBAgAABQMBAAEHIwUFc3RvcmUCAQJlcQAABHplcm8AAQRzYXZlAAIEbG9hZAADCv0BBIEBAQN/IABBEHQhAiABQRB0IQMgAkGAgARqIQQDQCAC/QAEACAD/QBEAQD9USAC/QAEECAD/QBEARD9Uf1QIAL9AAQgIAP9AEQBIP1RIAL9AAQwIAP9AEQBMP1R/VD9UP1TBEBBAA8LIAJBwABqIQIgA0HAAGohAyACIARJDQALQQELTgECfyAAQRB0IQEgAUGAgARqIQIDQCAB/QAEACAB/QAEEP1QIAH9AAQgIAH9AAQw/VD9UP1TBEBBAA8LIAFBwABqIQEgASACSQ0AC0EBCxQAIAFBEHQgAEEQdEGAgAT8CgEACxQAIAFBEHQgAEEQdEGAgAT8CgABCw==';
 
@@ -54,8 +57,10 @@ class Channel {
 }
 
 class Kernel {
-  constructor({ log = () => {} } = {}) {
+  constructor({ log = () => {}, onAbort = () => {} } = {}) {
     this.log = log;
+    this.onAbort = onAbort;
+    this.aborts = 0;
     this.channels = new Map();   // driver fd -> Channel
     this.procs = new Map();      // pid -> process
     this.nextFd = 100;
@@ -269,7 +274,14 @@ class Kernel {
       if (wake.start) this.engine.callMain(wake.start);
       else wake.fn(wake.value);
     } catch (e) {
-      if (!(e && (e.name === 'ExitStatus' || e === 'unwind'))) {
+      if (e && e.name === 'ExitStatus' && e.status === ABORT_STATUS) {
+        // a fatal TeX error (Emergency stop, "File ended while scanning
+        // ..."): only this process ends, as a native child process; the
+        // driver rolls back to an earlier fork with the next edit
+        this.aborts++;
+        this.log(`[kernel] engine pid ${p.pid} stopped on a fatal TeX error`);
+        this.onAbort(p.pid);
+      } else if (!(e && (e.name === 'ExitStatus' || e === 'unwind'))) {
         this.log(`[kernel] engine pid ${p.pid} failed: ${e && e.stack || e}`);
       }
       ended = true;

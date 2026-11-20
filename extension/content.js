@@ -70,6 +70,7 @@
           <input type="checkbox" class="olive-lua"> Lua results (shell escape)</label>
         <div class="olive-menu-buttons">
           <button class="olive-held" hidden title="Collaborators' edits wait until they are stable (2 s without typing, balanced braces and environments). Show them now.">Show collaborator edits now</button>
+          <button class="olive-report" title="Save a file with what happened in the last minute, to send with a bug report (Alt+Shift+R)">Report a problem</button>
           <button class="olive-sync" title="Send all project files again">Sync files</button>
           <button class="olive-off">Turn off Live</button>
         </div>
@@ -183,6 +184,7 @@
   });
   $(".olive-off").addEventListener("click", () => { menu.hidden = true; setOn(false); });
   $(".olive-sync").addEventListener("click", () => sync(true));
+  $(".olive-report").addEventListener("click", () => { menu.hidden = true; rec.report(); });
   $(".olive-held").addEventListener("click", () => window.postMessage({ [TAG + "Cmd"]: "releaseHeld" }, location.origin));
 
   // --- collaborators ---
@@ -1363,7 +1365,8 @@ $0
   // Mouse: a click goes to the source (the editor cursor to the clicked
   // character), a click on a link follows it, a drag selects text (Ctrl+C
   // copies it), a double-click edits (quick edit)
-  let down = null, selecting = false, selection = null;   // selection: {a, b} as [page, line, char]
+  let down = null, selecting = false, selection = null;
+  let pdfClickAt = -1e9;             // the last click on a page (the caret then does not scroll the PDF)   // selection: {a, b} as [page, line, char]
   const selLayers = [];
 
   function charAt(pt, snap) {
@@ -1456,9 +1459,16 @@ $0
   });
   window.addEventListener("mousemove", (e) => {
     if (!down) return;
-    if (!selecting && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 && down.at) {
-      selecting = true;
-      hoverBox.remove();
+    if (!selecting && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) {
+      // a drag is never a click (a click moves the editor cursor, and the
+      // PDF can scroll to the caret): a drag that starts beside the text
+      // selects from the nearest character
+      down.moved = true;
+      if (!down.at) down.at = charAt(down.pt, true);
+      if (down.at) {
+        selecting = true;
+        hoverBox.remove();
+      }
     }
     if (!selecting) return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
@@ -1473,9 +1483,11 @@ $0
     const d = down;
     down = null;
     if (selecting) { selecting = false; return; }
+    if (d.moved) return;                        // a drag (with no text to select): no click
     if (e.detail > 1 || !connected) return;     // the double-click does its own
     const link = linkAt(d.pt);
     if (link) { follow(link[4]); return; }
+    pdfClickAt = performance.now();
     askClick({ type: "click", page: d.pt.page, x: d.pt.x, y: d.pt.y });
   });
 
@@ -2418,9 +2430,134 @@ $0
       get predict() { return dstate.predict !== false; } };
   })();
 
+  // --- problem reports (Report a problem, Alt+Shift+R) --------------------
+  // Keeps what happened in the last minute: the messages to and from the
+  // engine (edits with their full text; pictures without their pixels), the
+  // mouse and keys on the live pages, and the scrolling. "Report a problem"
+  // saves it in a JSON file with the state of the viewer, the pictures of
+  // the pages in view and the project zip, so that test/run.sh --replay can
+  // run it again (see test/README.md). The file has the text of the project:
+  // send it only to people who may see the project.
+  const rec = (() => {
+    const KEEP_MS = 60 * 1000, MAX_EVENTS = 5000;
+    const events = [];
+    const base = {};              // path -> text before the first edit still in the list
+    let zip = null;               // the last project zip sent (base64)
+    let lastMove = 0;
+    const now = () => Math.round(performance.now());
+    function push(ev) {
+      ev.t = now();
+      events.push(ev);
+      while (events.length > MAX_EVENTS || (events.length && ev.t - events[0].t > KEEP_MS)) {
+        const old = events.shift();
+        if (old.dir === "out" && old.msg.type === "edit") base[old.msg.path] = old.msg.text;
+      }
+    }
+    // large engine answers: only what they are about
+    const SMALL = new Set(["pageMap", "pageCache", "caretDebug", "caretElements", "pageFields"]);
+    function trimIn(msg) {
+      if (msg.type === "page") return { type: "page", page: msg.page, count: msg.count, done: msg.done, w: msg.w, h: msg.h };
+      if (SMALL.has(msg.type)) return { type: msg.type, page: msg.page };
+      return msg;
+    }
+    function out(msg) {
+      if (msg.type === "project") { zip = msg.zip; push({ dir: "out", msg: { type: "project" } }); return; }
+      push({ dir: "out", msg });
+    }
+    function inc(msg) { if (msg.type !== "timing") push({ dir: "in", msg: trimIn(msg) }); }
+    function mouse(kind, e) {
+      const pt = pointOf(e);
+      push({ dir: "ui", ev: kind, page: pt ? pt.page : -1, x: pt ? +pt.x.toFixed(2) : null, y: pt ? +pt.y.toFixed(2) : null,
+             button: e.button, detail: e.detail, shift: e.shiftKey || undefined, ctrl: e.ctrlKey || undefined,
+             onText: pt ? !!charAt(pt, false) : undefined });
+    }
+    pages.addEventListener("mousedown", (e) => mouse("down", e), true);
+    pages.addEventListener("dblclick", (e) => mouse("dblclick", e), true);
+    window.addEventListener("mouseup", (e) => { if (pages.contains(e.target)) mouse("up", e); else push({ dir: "ui", ev: "up-outside" }); }, true);
+    window.addEventListener("mousemove", (e) => {
+      if (!e.buttons || !pages.contains(e.target) || performance.now() - lastMove < 50) return;
+      lastMove = performance.now();
+      mouse("drag", e);
+    }, true);
+    scroller.addEventListener("keydown", (e) => push({ dir: "ui", ev: "key", key: e.key, ctrl: e.ctrlKey || e.metaKey || undefined }), true);
+    let scrollTimer = 0;
+    scroller.addEventListener("scroll", () => {
+      clearTimeout(scrollTimer);
+      scrollTimer = setTimeout(() => push({ dir: "ui", ev: "scroll", top: Math.round(scroller.scrollTop), first: view.first, last: view.last }), 150);
+    }, { passive: true });
+
+    function stamp() {
+      const d = new Date(), z = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+    }
+    // a small form over the pages: what went wrong (no blocking dialog: the
+    // engine's answers still come while it is open)
+    let form = null;
+    function report() {
+      if (form) { form.querySelector("textarea").focus(); return; }
+      const at = now();
+      form = document.createElement("div");
+      form.className = "olive-report";
+      form.innerHTML = `<b>Report a problem</b>
+        <div class="olive-report-note">Saves a file with what happened in the last minute (edits, clicks,
+          the engine's answers, the pictures in view and the project files). Send the file to the person
+          who helps you. It has the text of this project.</div>
+        <textarea rows="3" placeholder="What went wrong? (optional)"></textarea>
+        <div class="olive-report-buttons"><button type="button" class="olive-report-cancel">Cancel</button>
+          <button type="button" class="olive-report-save">Save report</button></div>`;
+      const close = () => { form.remove(); form = null; };
+      form.querySelector(".olive-report-cancel").addEventListener("click", close);
+      form.querySelector(".olive-report-save").addEventListener("click", () => {
+        const note = form.querySelector("textarea").value;
+        close();
+        save(note, at);
+      });
+      form.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") close();
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) form.querySelector(".olive-report-save").click();
+      });
+      pane.appendChild(form);
+      form.querySelector("textarea").focus();
+    }
+    // at: when the report was asked for (the events after it are the form)
+    function save(note, at) {
+      const pictures = {};
+      for (let p = Math.max(0, view.first); p <= view.last && p < slots().length; p++) {
+        const img = slots()[p].querySelector("img");
+        if (img && img.src.startsWith("data:")) pictures[p] = img.src;
+      }
+      const data = {
+        kind: "overleaf-live-report", format: 1, version: chrome.runtime.getManifest().version,
+        time: new Date().toISOString(), note, userAgent: navigator.userAgent, devicePixelRatio: window.devicePixelRatio,
+        project: projectId, detached, engine, main: settings.main, settings,
+        state: { status, errors, lastErrorItems, pageCount, done, pageSize, view, caret, lastCursor,
+                 scrollTop: Math.round(scroller.scrollTop), scale: scale(), selection, docId },
+        base, texts: Object.fromEntries(lastText), zip, pictures, now: at, events: events.filter(e => e.t <= at),
+      };
+      const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `overleaf-live-report-${stamp()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      setStatus("problem report saved (in your downloads)", false);
+    }
+    window.addEventListener("keydown", (e) => {
+      if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyR" && settings.on) {
+        e.preventDefault();
+        e.stopPropagation();
+        report();
+      }
+    }, true);
+    return { out, inc, report };
+  })();
+
   // --- connection ---------------------------------------------------
   function send(msg) {
-    if (port && connected) port.postMessage(msg);
+    if (port && connected) { rec.out(msg); port.postMessage(msg); }
   }
 
   function connect() {
@@ -2460,6 +2597,7 @@ $0
   }
 
   function onHelper(msg) {
+    rec.inc(msg);
     switch (msg.type) {
       case "connected":
         connected = true;
@@ -2511,6 +2649,9 @@ $0
       case "errors":
         errors = msg.lines;
         lastErrorItems = msg.items || [];
+        // no errors: nothing is broken, the pale "last good" pages go (else
+        // they stay until the second pass is done, 2-3 s after the fix)
+        if (!errors.length) for (const s of slots()) s.classList.remove("olive-slot-stale");
         checkRelease(lastErrorItems);
         if (done && !shrinkTimer) settleShrink();
         showStatus();
@@ -2533,7 +2674,10 @@ $0
         if (caret && caret.predicted && caret.page === msg.page)
           latency("predicted vs engine caret", 0, Math.hypot(caret.x - msg.x, caret.y - msg.y) < 1.5 ? "same" : "different");
         caret = msg;
-        placeCaret(Date.now() - lastCursorMove < 3000);
+        // after a click on the page, the PDF does not scroll to the caret: the
+        // caret can be away from the click (code shown as a listing and as
+        // its output: the caret is at the output)
+        placeCaret(Date.now() - lastCursorMove < 3000 && performance.now() - pdfClickAt > 2000);
         setPredBase(msg);
         if (cursorAt) {
           latency("cursor → caret", performance.now() - cursorAt, cursorCached ? "cache, then engine" : "engine");

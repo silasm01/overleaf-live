@@ -87,6 +87,7 @@ It gets the newest version from GitHub, rebuilds TeXpresso only when its patch c
 4. The **Live** button shows the status: a green dot is live, an orange dot is busy (typesetting, sending files, Lua), and a red dot shows the number of LaTeX errors. Click it for the menu:
    - the status and the LaTeX errors with line numbers
    - **Lua results** (WSL helper only; in the browser engine they are always on): for calc and fsm. This runs a normal compile (`latexmk -xelatex -shell-escape`) on your PC approx. 2 seconds after you stop typing. Then TeXpresso shows the new results. **Shell escape can run any command on your PC.** Turn it on only for projects you trust (yours). The setting is saved for each project.
+   - **Report a problem**: saves a file with what happened in the last minute (edits, clicks, the engine's answers, the pages in view and the project files), to send with a bug report. Also **Alt+Shift+R**. The file has the text of the project. See `test/README.md`.
    - **Sync files**: sends all project files again. The extension does this automatically when you open another file. Overleaf allows 10 downloads a minute, so the extension waits at least 10 seconds between syncs.
    - **Turn off Live**: Overleaf's own PDF and toolbar again.
 5. **Cursor in the PDF (SyncTeX)**: an orange caret on the live page shows where the editor cursor is. It moves when you move the cursor or type. The PDF scrolls only when the caret is out of view. A **double-click** on a live page moves the editor cursor to that text, and opens its file when it is another file. Overleaf's two arrow buttons between the editor and the PDF still use Overleaf's own compiled PDF.
@@ -166,6 +167,10 @@ browser** in the Live menu (the default).
   `kpsewhich` and `texlua`. For this, the project needs the luabridge.tex of
   latex-templates from 14 November 2026 or later (it runs texlua also with a
   restricted shell escape when texlua is allowed).
+- **Fatal TeX errors** (for example an open `{` in `\textbf{` or `\frac{1}{`,
+  or a package name that is not complete yet) stop only the current run, as
+  in the WSL helper: the pages before the error stay, and the next edit goes
+  on from an earlier snapshot (approx. 0.1-0.5 s, no restart of the engine).
 - **Limits for now:**
   - Fonts by file name only (`\setmainfont{texgyrepagella}[Extension=.otf, ...]`
     or a font file in the project). Font names through fontconfig
@@ -184,6 +189,13 @@ browser** in the Live menu (the default).
 - The extension uses Overleaf's unsupported hook for extensions (`UNSTABLE_editor:extensions`). An Overleaf update can break it.
 - The extension reads edits only for the open file, but these include edits by collaborators. Changes in other files come with the next Sync.
 - WSL helper: TeXpresso does not run BibTeX. With Lua on, the normal compile makes the `.bbl` file, and TeXpresso uses it. (The browser engine runs BibTeX itself; see "Browser engine".)
+
+## Tests
+
+`test/run.sh --templates ../latex-templates` runs the tests of the browser
+engine and the viewer in headless Chrome (typing errors, fast fixes, clicks
+and caret, selection, problem reports). All tests must pass before a new
+version is published. See `test/README.md`.
 
 ## Chrome Web Store
 

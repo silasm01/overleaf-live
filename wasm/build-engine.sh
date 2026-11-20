@@ -29,4 +29,11 @@ case $MODE in
 esac
 em++ -O2 $O/*.o -o $OUT $LIBS -lexpat \
   --js-library $HERE/js/lib-tl.js -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=8MB -sINITIAL_MEMORY=64MB $LF ${EXTRA_LDFLAGS:-}
+# kernel: the engine's abort() (a fatal TeX error: _tt_abort -> abort) must
+# end only the engine process, as natively, not stop the WASM module (kernel.js
+# treats ExitStatus 134 as the end of that process)
+if [ "$MODE" = kernel ]; then
+  grep -q 'var __abort_js=()=>abort("");' $OUT || { echo "build-engine.sh: __abort_js not found in $OUT" >&2; exit 1; }
+  sed -i 's/var __abort_js=()=>abort("");/var __abort_js=()=>{throw new ExitStatus(134)};/' $OUT
+fi
 ls -la ${OUT%.js}.*

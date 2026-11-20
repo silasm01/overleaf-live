@@ -1,0 +1,103 @@
+<!doctype html><meta charset=utf-8><title>Fake Overleaf (Overleaf Live tests)</title>
+<style>
+  body { margin: 0; display: flex; height: 100vh; font: 13px sans-serif; }
+  #left { width: 40%; display: flex; flex-direction: column; border-right: 1px solid #ccc; }
+  #tree { padding: 4px; } #tree ul { list-style: none; margin: 0; padding-left: 12px; }
+  #editor { flex: 1; font: 12px monospace; }
+  #right { flex: 1; display: flex; flex-direction: column; }
+  #toolbar-pdf-controls { height: 32px; display: flex; gap: 6px; align-items: center; border-bottom: 1px solid #ccc; }
+  .pdf-viewer { flex: 1; position: relative; overflow: hidden; }
+</style>
+<div id="left">
+  <div id="tree"><ul role="tree" id="treeroot"></ul></div>
+  <textarea id="editor" spellcheck="false"></textarea>
+</div>
+<div id="right">
+  <div id="toolbar-pdf-controls">
+    <div class="pdfjs-toolbar-buttons"><button>˄</button><button>˅</button></div>
+    <div class="pdfjs-page-number-input"><input size="3"><span>/ 1</span></div>
+    <div class="pdfjs-zoom-controls"><div class="pdfjs-toolbar-buttons"><button>−</button><button>+</button></div></div>
+    <button id="pdf-zoom-dropdown" aria-expanded="false">100%</button>
+  </div>
+  <div class="pdf-viewer"></div>
+</div>
+<script>
+// A stand-in for Overleaf and for page.js: a file tree (data-file-id,
+// aria-label as Overleaf), a plain editor, and the messages of page.js to
+// content.js (opened, doc, cursor). The commands of content.js (goto,
+// replace, ...) are kept in fake.cmds and done on the plain editor.
+// The test sets the files with fake.load({path: text}) before Live is on.
+const TAG = '__overleafLive';
+const fake = window.fake = {
+  files: {}, ids: {}, open: null, cmds: [], cursor: { line: 1, column: 0 },
+  post(msg) { window.postMessage({ [TAG]: true, ...msg }, location.origin); },
+  load(files) {
+    this.files = files;
+    const root = document.getElementById('treeroot');
+    root.textContent = '';
+    let n = 0;
+    // folders: <li folder> then <ul role=tree> with its items, as Overleaf
+    const lists = { '': root };
+    for (const path of Object.keys(files).sort()) {
+      const parts = path.split('/');
+      let dir = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        const sub = dir ? dir + '/' + parts[i] : parts[i];
+        if (!lists[sub]) {
+          const li = document.createElement('li');
+          li.setAttribute('role', 'treeitem'); li.setAttribute('aria-label', parts[i]);
+          const span = document.createElement('span'); span.dataset.fileId = 'folder-' + (n++); span.textContent = parts[i] + '/';
+          li.appendChild(span);
+          const ul = document.createElement('ul'); ul.setAttribute('role', 'tree');
+          lists[dir].append(li, ul);
+          lists[sub] = ul;
+        }
+        dir = sub;
+      }
+      const li = document.createElement('li');
+      li.setAttribute('role', 'treeitem'); li.setAttribute('aria-label', parts[parts.length - 1]);
+      const id = 'doc' + String(n++).padStart(4, '0');
+      const span = document.createElement('span'); span.dataset.fileId = id; span.textContent = parts[parts.length - 1];
+      span.addEventListener('click', () => this.openFile(path));
+      li.appendChild(span);
+      lists[dir].appendChild(li);
+      this.ids[path] = id;
+    }
+  },
+  openFile(path) {
+    this.open = path;
+    editor.value = this.files[path];
+    this.post({ kind: 'opened', docId: this.ids[path] });
+    this.post({ kind: 'doc', docId: this.ids[path], text: this.files[path], t: performance.now() });
+  },
+  setText(text) {
+    this.files[this.open] = text;
+    editor.value = text;
+    this.post({ kind: 'doc', docId: this.ids[this.open], text, t: performance.now() });
+    this.sendCursor();
+  },
+  setCursor(line, column) { this.cursor = { line, column }; this.sendCursor(); },
+  sendCursor() {
+    this.post({ kind: 'cursor', docId: this.ids[this.open], line: this.cursor.line, column: this.cursor.column, t: performance.now() });
+  },
+};
+// problem reports (content.js saves them as a download): kept here, not
+// downloaded (a download in headless Chrome with the extension closes it)
+fake.reports = [];
+document.addEventListener('click', (e) => {
+  const a = e.target && e.target.closest && e.target.closest('a[download]');
+  if (!a) return;
+  e.preventDefault();
+  fetch(a.href).then(r => r.text()).then(text => fake.reports.push({ name: a.download, text }));
+}, true);
+const editor = document.getElementById('editor');
+editor.addEventListener('input', () => fake.setText(editor.value));
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (e.source !== window || !d || !d[TAG + 'Cmd']) return;
+  fake.cmds.push({ ...d, t: performance.now() });
+  const cmd = d[TAG + 'Cmd'];
+  if (cmd === 'goto') { fake.setCursor(d.line, d.column); }
+  else if (cmd === 'resend' && fake.open) fake.post({ kind: 'doc', docId: fake.ids[fake.open], text: fake.files[fake.open], t: performance.now() });
+});
+</script>

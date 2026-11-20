@@ -1,0 +1,23 @@
+<!doctype html><meta charset=utf-8><title>Overleaf Live tests</title>
+<script>
+// The test page: starts engine workers (extension/engine/worker.js) and keeps
+// their messages for lib.mjs. One engine at a time is the usual case.
+window.engines = {};
+window.startEngine = (id) => {
+  const w = new Worker('engine/worker.js');
+  const e = { w, msgs: [], pages: {} };
+  w.onmessage = (ev) => {
+    const m = ev.data && ev.data.msg;
+    if (!m) return;
+    m.t = performance.now();
+    if (m.type === 'page') e.pages[m.page] = m.png;
+    e.msgs.push(m.type === 'page' ? { type: 'page', page: m.page, count: m.count, done: m.done, t: m.t } : m);
+  };
+  w.postMessage({ config: { repos: [location.origin + '/tlnet'], version: 'test' } });
+  engines[id] = e;
+};
+window.sendTo = (id, msg) => engines[id].w.postMessage({ client: 1, msg });
+window.takeMsgs = (id, from) => engines[id].msgs.slice(from);
+window.pagesOf = (id) => engines[id].pages;
+window.stopEngine = (id) => { engines[id].w.terminate(); delete engines[id]; };
+</script>

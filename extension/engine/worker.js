@@ -252,7 +252,10 @@ async function start() {
                   // debug panel timings: start, per edit, per frame (tick), deep (to idle)
                   tStart: t0, startParts: parts, tLap: () => tLap, tWork: t0, tEdit: 0, editTicks: 0,
                   editTickMs: 0, fr: { n: 0, sum: 0, max: 0, t0: performance.now() } };
-    run.kernel = new Kernel({ log: s => { if (/failed/.test(s)) { run.failed = true; log(s); } } });
+    // onAbort: a fatal TeX error ended the engine process (not the module):
+    // its outputs (.aux, ...) are not complete, so no second pass with them
+    run.kernel = new Kernel({ log: s => { if (/failed/.test(s)) { run.failed = true; log(s); } },
+      onAbort: () => { run.aborted = run.abortedErrors = true; log('fatal TeX error: the engine goes back with the next edit'); } });
     run.engine = await createEngine({ kernel: run.kernel, tl, preRun: [m => Object.assign(m.ENV, env)],
       print: () => {}, printErr: () => {} });
     run.kernel.attachEngine(run.engine);
@@ -333,6 +336,13 @@ function step() {
       if (run.tEdit) { run.editTicks++; run.editTickMs += d; }
     }
   } catch (e) { fail(e); return; }
+  // after a fatal error, the errors of the next run as soon as the pages in
+  // view are done (the engine sends errors only at the end of the document:
+  // the fatal error and the pale pages would stay until then)
+  if (run.abortedErrors && !run.aborted && (run.count > P.last || !more)) {
+    run.abortedErrors = false;
+    reportErrors(run);
+  }
   // per second: the engine's ticks (debug panel)
   const fnow = performance.now();
   if (fnow - run.fr.t0 >= 1000) {
@@ -356,7 +366,7 @@ function step() {
     pump();
     return;
   }
-  // the pages in view are done: the caches the viewer asked for
+  // the caches the viewer asked for
   if (flushCache()) return;
   if (P.lastMsg.status && P.lastMsg.status.busy && P.lastMsg.status.text === 'typesetting') status('live', false);
   // after a pause in typing only (as the helper's latexmk), so that edits
@@ -394,6 +404,7 @@ const ALL_PAGES = 100000;         // export-range: all pages
 const BACKGROUND_PAUSE = 2000;   // ms without edits before the second pass (helper: LUA_IDLE)
 
 function secondPass(run) {
+  if (run.aborted) return false;
   if (run.passes >= 3 || run.bibBusy) return run.bibBusy;
   const [p] = run.cstr('/outputs.bin');
   const count = run.drv._txp_wasm_dump_outputs(p);
@@ -514,6 +525,31 @@ function fail(e) {
   status('TeXpresso stopped (it restarts with the next edit)', false);
 }
 
+// --- a click on a page: checked before the editor cursor moves ---------------
+// A click goes to a source place (synctex-click). Some places are not where
+// the click was: a page header or footer, or the page number, maps to the
+// line where TeX made the page, often on the next page. Then the editor
+// cursor and the caret would jump to another page. So the worker asks the
+// caret of that place first (synctex-forward): the cursor moves only if the
+// caret is on the clicked page. While the check runs (at most 600 ms), the
+// editor's cursor messages wait.
+function clickChecked(page) {
+  const c = P.clickCheck;
+  if (page === c.page) endClickCheck(c.goto);
+  else {
+    log(`click on page ${c.page + 1}: its source place ${c.goto.path}:${c.goto.line} is on page ${page + 1}; not followed`);
+    endClickCheck(null);
+  }
+}
+function endClickCheck(goto) {
+  const c = P.clickCheck;
+  if (!c) return;
+  clearTimeout(c.timer);
+  P.clickCheck = null;
+  if (goto) send(goto);
+  if (c.deferred) handlers.cursor(c.client, c.deferred);
+}
+
 // --- TeXpresso's output (as helper read_texpresso) ---------------------------
 const pageRe = /^\(page-image (\d+) (\d+) (\d) "(.*)"(?: ([\d.]+) ([\d.]+))?\)$/;
 const countRe = /^\(page-count (\d+) (\d)\)$/;
@@ -553,9 +589,11 @@ function onLine(run, line) {
              ticks: run.editTicks, tickMs: Math.round(run.editTickMs) });
       run.tEdit = 0;
     }
+    run.count = +m[2];
     send({ type: 'page', page: +m[1], count: +m[2], done: m[3] === '1', png: toBase64(data),
       w: parseFloat(m[5] || '595.28'), h: parseFloat(m[6] || '841.89') });
   } else if ((m = line.match(caretRe))) {
+    if (P.clickCheck && P.clickCheck.goto) { clickChecked(+m[1]); return; }
     const caret = { type: 'caret', page: +m[1], x: +m[2], y: +m[3], h: +m[4], d: +m[5] };
     if (m[6]) caret.box = m[6].trim().split(' ').map(Number);
     if (m[7]) caret.element = true;
@@ -604,6 +642,7 @@ function onLine(run, line) {
     const m = line.match(/^\(dest "((?:[^"\\]|\\.)*)" (-?\d+) ([-\d.]+) ([-\d.]+)\)$/);
     if (m) send({ type: 'dest', name: unescape(m[1]), page: +m[2], x: +m[3], y: +m[4] });
   } else if (line.startsWith('(synctex-notready ')) {
+    endClickCheck(null);
     send({ type: 'notReady', page: parseInt(line.slice(18), 10) });
   } else if (line.startsWith('(synctex-choice ')) {
     const c = parseChoice(line);
@@ -621,8 +660,19 @@ function onLine(run, line) {
     let path = unescape(m[1]);
     if (path.startsWith(PROJECT + '/')) path = path.slice(PROJECT.length + 1);
     const rel = safeRel(path);
-    if (rel) send({ type: 'goto', path: rel, line: +m[2], column: Math.max(0, +m[3]) });
+    const goto = rel && { type: 'goto', path: rel, line: +m[2], column: Math.max(0, +m[3]) };
+    if (goto && P.clickCheck && !P.clickCheck.goto) {
+      // a click: where would the caret be for this source place? (after
+      // this tick: no command while the driver prints)
+      const c = P.clickCheck;
+      c.goto = goto;
+      c.timer = setTimeout(() => endClickCheck(c.goto), 600);
+      setTimeout(() => { if (P.clickCheck === c) command(`(synctex-forward ${sexpString(`${PROJECT}/${rel}`)} ${Math.max(1, goto.line)} ${goto.column})`); }, 0);
+      return;
+    }
+    if (goto) send(goto);
   } else if ((m = line.match(countRe))) {
+    run.count = +m[1];
     send({ type: 'count', count: +m[1], done: m[2] === '1' });
   } else if ((m = line.match(appendRe))) {
     run.out = run.out.slice(0, +m[1]) + unescape(m[2]);
@@ -777,6 +827,7 @@ const handlers = {
       // a picture file can change a page without changing its DVI code:
       // then all pages are drawn again (if they changed)
       if (picture) command(`(export-png ${sexpString(EXPORT)} ${P.width})`);
+      P.run.aborted = false;
       command('(rescan)');
       status(`project files updated (${changed})`, false);
     } else {
@@ -795,6 +846,7 @@ const handlers = {
     P.lastActivity = performance.now();
     if (P.run) {
       P.run.passes = 0;
+      P.run.aborted = false;     // the engine goes back to before the edit
       if (changed) P.run.edited = true;    // (the same text again: e.g. the editor at the start)
       P.run.inViewDone = false;
       P.cacheQueue.length = 0;    // the pages change: the viewer asks again
@@ -833,6 +885,8 @@ const handlers = {
   cursor(client, msg) {
     const rel = safeRel(msg.path || '');
     if (!rel || !P.run) return;
+    // while a click is checked, the caret answers belong to the check
+    if (P.clickCheck) { P.clickCheck.deferred = msg; return; }
     if (msg.seq !== undefined) P.cursorSeq = msg.seq;
     command(`(synctex-forward ${sexpString(`${PROJECT}/${rel}`)} ${Math.max(1, msg.line | 0)} ${Math.max(0, msg.column | 0)})`);
   },
@@ -843,7 +897,11 @@ const handlers = {
   // a single click: the editor cursor to the clicked character
   click(client, msg) {
     if (!P.run) return;
-    command(`(synctex-click ${Math.max(0, msg.page | 0)} ${(+msg.x || 0).toFixed(2)} ${(+msg.y || 0).toFixed(2)})`);
+    const page = Math.max(0, msg.page | 0);
+    // the answer (goto) is checked first: see clickChecked
+    endClickCheck(null);
+    P.clickCheck = { page, client, goto: null, timer: 0 };
+    command(`(synctex-click ${page} ${(+msg.x || 0).toFixed(2)} ${(+msg.y || 0).toFixed(2)})`);
   },
   // what a double-click would do at a point (hover cursor)
   probe(client, msg) {
