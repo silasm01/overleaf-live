@@ -170,7 +170,6 @@ browser** in the Live menu (the default).
   - Fonts by file name only (`\setmainfont{texgyrepagella}[Extension=.otf, ...]`
     or a font file in the project). Font names through fontconfig
     (`\setmainfont{TeX Gyre Pagella}`) are not supported yet.
-  - One project at a time: a second project's tab takes over the engine.
 
 ## Requirements for a project
 
@@ -185,6 +184,10 @@ browser** in the Live menu (the default).
 - The extension uses Overleaf's unsupported hook for extensions (`UNSTABLE_editor:extensions`). An Overleaf update can break it.
 - The extension reads edits only for the open file, but these include edits by collaborators. Changes in other files come with the next Sync.
 - WSL helper: TeXpresso does not run BibTeX. With Lua on, the normal compile makes the `.bbl` file, and TeXpresso uses it. (The browser engine runs BibTeX itself; see "Browser engine".)
+
+## Chrome Web Store
+
+`./pack-store.sh` makes the ZIP for the Chrome Web Store (without the `key` field, with the store name "Live Preview for Overleaf (TeXpresso)"). `STORE.md` has the text for each field of the developer dashboard, `store/` has the pictures, and `PRIVACY.md` is the privacy policy.
 
 ## If it does not work
 
